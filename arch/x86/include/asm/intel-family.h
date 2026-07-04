@@ -132,7 +132,6 @@
 
 /* "Hybrid" Processors (P-Core/E-Core) */
 
-// trecho de compatibilidade
 #define INTEL_FAM6_ALDERLAKE		0x97	/* Golden Cove / Gracemont */
 #define INTEL_FAM6_ALDERLAKE_L		0x9A	/* Golden Cove / Gracemont */
 #define INTEL_FAM6_ALDERLAKE_N		0xBE
@@ -146,6 +145,13 @@
 
 #define INTEL_FAM6_LUNARLAKE_M		0xBD
 
+#define INTEL_FAM6_ARROWLAKE_H		0xC5
+#define INTEL_FAM6_ARROWLAKE		0xC6
+#define INTEL_FAM6_ARROWLAKE_U		0xB5
+
+#define INTEL_FAM6_PANTHERLAKE_L	0xCC
+
+#define INTEL_FAM6_WILDCATLAKE_L	0xD5
 
 
 #define INTEL_LAKEFIELD			IFM(6, 0x8A) /* Sunny Cove / Tremont */

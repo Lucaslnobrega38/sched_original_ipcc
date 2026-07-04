@@ -69,11 +69,9 @@ static bool classification_is_accurate(u8 hfi_class, bool smt_siblings_idle)
 	case INTEL_FAM6_RAPTORLAKE:
 	case INTEL_FAM6_RAPTORLAKE_P:
 	case INTEL_FAM6_RAPTORLAKE_S:
-	case 0xC6: /* Arrow Lake (HX/S) - Lion Cove / Skymont. No legacy
-		    * INTEL_FAM6_* macro exists for it in this header; the
-		    * new INTEL_ARROWLAKE* macros are VFM-encoded and not
-		    * usable as a raw x86_model value here.
-		    */
+	case INTEL_FAM6_ARROWLAKE:
+	case INTEL_FAM6_ARROWLAKE_U:
+	case INTEL_FAM6_ARROWLAKE_H: 
 		if (hfi_class == 3 || hfi_class == 2 || smt_siblings_idle)
 			return true;
 
