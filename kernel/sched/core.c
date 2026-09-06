@@ -4393,6 +4393,17 @@ static void __sched_fork(u64 clone_flags, struct task_struct *p)
 	p->ipcc = 0;
 	p->ipcc_prev = 0;
 	p->ipcc_stable_count = 0;
+	p->ipcc_confirm_count = 0;
+	memset(p->ipcc_class_weight, 0, sizeof(p->ipcc_class_weight));
+	/*
+	 * ipcc_shadow_last_turn is deliberately NOT stamped here: sched_init()
+	 * calls __sched_fork() directly for the boot CPU's idle task, before
+	 * timekeeping_init() has run, and ktime_get() is not safe to call yet
+	 * at that point (hung on exactly this during testing). The idle task
+	 * never becomes a shadow candidate anyway (no ->mm), so its stamp
+	 * value is irrelevant - only real forks need it, and those go through
+	 * sched_fork() below, always well after boot. See there.
+	 */
 #endif
 
 	p->on_rq			= 0;
@@ -4633,6 +4644,20 @@ late_initcall(sched_core_sysctl_init);
 int sched_fork(u64 clone_flags, struct task_struct *p)
 {
 	__sched_fork(clone_flags, p);
+
+#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
+	/*
+	 * Safe here (unlike in __sched_fork(), see the comment there): every
+	 * caller of sched_fork() is a real fork through copy_process(), long
+	 * after timekeeping_init() has run. Otherwise inherited verbatim from
+	 * the parent by dup_task_struct(), which would make a brand-new
+	 * task's lag (ktime_get() - this) look like however long the parent
+	 * had been waiting - possibly a lot - and let it outrank every task
+	 * that has genuinely been waiting. Stamping "now" here is what makes
+	 * lag start at 0 for a fork.
+	 */
+	p->ipcc_shadow_last_turn = ktime_get();
+#endif
 	/*
 	 * We mark the process as NEW here. This guarantees that
 	 * nobody will actually run it, and a signal or other external
@@ -5567,6 +5592,18 @@ void sched_tick(bool user_tick)
 	}
 
 	rq_lock(rq, &rf);
+
+	/*
+	 * The ipcc-weighted load_avg_ipcc aggregate used to be refreshed
+	 * right here, once per tick, but only for the leaf cfs_rq
+	 * (cfs_rq_of(&rq->curr->se)) - in a cgroup hierarchy that never
+	 * reached the root cfs_rq the load balancer actually reads, except
+	 * on enqueue/dequeue (wake/sleep/migrate) events. It now rides the
+	 * existing per-level for_each_sched_entity() walk in entity_tick()
+	 * (kernel/sched/fair.c), which already runs once per tick for every
+	 * ancestor cfs_rq for the unrelated purpose of PELT accounting - see
+	 * update_entity_load_avg_ipcc() there.
+	 */
 	donor = rq->donor;
 
 	psi_account_irqtime(rq, donor, NULL);

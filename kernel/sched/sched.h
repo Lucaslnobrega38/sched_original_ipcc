@@ -713,6 +713,7 @@ struct cfs_rq {
 		unsigned long	load_avg;
 		unsigned long	util_avg;
 		unsigned long	runnable_avg;
+		unsigned long load_avg_ipcc;
 	} removed;
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -1171,7 +1172,6 @@ struct rq {
 #endif
 
 #ifdef CONFIG_IPC_CLASSES
-#define NR_IPC_CLASSES	5  /* ipcc 0 (unclassified) + classids 0-3 → ipcc 1-4 */
 	unsigned char		nr_ipcc[NR_IPC_CLASSES];
 #endif
 
@@ -2163,7 +2163,7 @@ extern struct static_key_false sched_cluster_active;
 
 static __always_inline bool sched_asym_cpucap_active(void)
 {
-	return static_branch_unlikely(&sched_asym_cpucapacity);  // o caminho favorecido é o de cpus homogeneas
+	return static_branch_unlikely(&sched_asym_cpucapacity);  
 }
 
 struct sched_group_capacity {
@@ -3127,15 +3127,61 @@ unsigned long arch_get_ipcc_score(unsigned short ipcc, int cpu)
 	return SCHED_IPCC_SCORE_SCALE;
 }
 #endif
+
+#ifndef arch_get_ipcc_baseline
+static inline int arch_get_ipcc_baseline(void) { return 1; }
+#endif
+
+/*
+ * ipcc_weighted_score() - Expected IPC score of @p on @cpu, weighted by its
+ * recent class-mix history (@p->ipcc_class_weight).
+ *
+ * Unlike arch_get_ipcc_score(p->ipcc, cpu), which only reflects @p's single
+ * currently-confirmed class, this blends every class @p has recently
+ * exhibited, weighted by how much of its recent runtime was spent in each.
+ * The weight vector itself is cpu-independent (it is about @p's instruction
+ * mix, not about any particular core), so it can be evaluated against any
+ * candidate @cpu's score table without needing to "transfer" anything.
+ */
+static inline unsigned long ipcc_weighted_score(struct task_struct *p, int cpu)
+{
+	unsigned long sum = 0, total = 0;
+	int i, score;
+
+	for (i = 1; i < NR_IPC_CLASSES; i++) {
+		unsigned short w;
+
+		score = arch_get_ipcc_score(i, cpu);
+		if (score <= 0)
+			continue;
+		/*
+		 * @p is very often a task on a remote rq (the load balancer is
+		 * the main caller, via apply_ipcc_weight()/task_h_load_ipcc()),
+		 * read without that rq's lock - matches the WRITE_ONCE side in
+		 * update_ipcc_class_weights() (arch/x86/kernel/sched_ipcc.c).
+		 */
+		w = READ_ONCE(p->ipcc_class_weight[i]);
+		sum   += (unsigned long)w * score;
+		total += w;
+	}
+
+	return total ? sum / total : arch_get_ipcc_baseline();
+}
+
 #else /* CONFIG_IPC_CLASSES */
 
 #define arch_get_ipcc_score(ipcc, cpu) (-EINVAL)
 #define arch_update_ipcc(curr)
+#define arch_get_ipcc_baseline() (1)
 
 static inline bool sched_ipcc_enabled(void) { return false; }
 
-#endif /* CONFIG_IPC_CLASSES */
+static inline unsigned long ipcc_weighted_score(struct task_struct *p, int cpu)
+{
+	return 1;
+}
 
+#endif /* CONFIG_IPC_CLASSES */
 
 #ifndef arch_scale_freq_capacity
 /**

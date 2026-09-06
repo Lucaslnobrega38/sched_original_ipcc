@@ -336,16 +336,23 @@ extern int arch_sched_node_distance(int from, int to);
 #ifdef CONFIG_INTEL_HFI_THERMAL
 int intel_hfi_read_classid(u8 *classid);
 unsigned long intel_hfi_get_ipcc_score(unsigned short ipcc, int cpu);
+int intel_hfi_get_ipcc_baseline(void);
 #else
 static inline int intel_hfi_read_classid(u8 *classid) { return -ENODEV; }
 static inline unsigned long
 intel_hfi_get_ipcc_score(unsigned short ipcc, int cpu) { return -ENODEV; }
+static inline int intel_hfi_get_ipcc_baseline(void) { return 1; }
 #endif
 
 #ifdef CONFIG_IPC_CLASSES
 void intel_update_ipcc(struct task_struct *curr);
 #define arch_update_ipcc intel_update_ipcc
 #define arch_get_ipcc_score intel_hfi_get_ipcc_score
+#define arch_get_ipcc_baseline intel_hfi_get_ipcc_baseline
+#endif
+
+#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
+void intel_classify_ipcc_final(struct task_struct *p);
 #endif
 
 #endif /* _ASM_X86_TOPOLOGY_H */

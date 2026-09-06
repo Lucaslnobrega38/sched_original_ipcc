@@ -46,6 +46,7 @@
 #include <linux/pkeys.h>
 #include <linux/oom.h>
 #include <linux/sched/mm.h>
+#include <linux/ipcc_stash.h>
 #include <linux/ksm.h>
 #include <linux/memfd.h>
 
@@ -1279,6 +1280,15 @@ void exit_mmap(struct mm_struct *mm)
 	unsigned long nr_accounted = 0;
 	VMA_ITERATOR(vmi, mm, 0);
 	struct unmap_desc unmap;
+
+	/*
+	 * If this is an IPCC shadow clone's mm, detach it from the real task
+	 * it was cloned from. Done here rather than in any of the classifier's
+	 * own kill paths because this is the single point every shadow death
+	 * passes through, and it runs before free_pgtables() below, while any
+	 * pending stash entries in the page tables are still walkable.
+	 */
+	ipcc_stash_unlink_shadow(mm);
 
 	/* mm's last user has gone, and its about to be pulled down */
 	mmu_notifier_release(mm);

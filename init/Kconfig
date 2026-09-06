@@ -33,6 +33,56 @@ config IPC_CLASSES
       Uses hardware classification to guide task placement on
       asymmetric processors (P-cores vs E-cores).
 
+config IPC_CLASSES_ACTIVE_CLASSIFIER
+    bool "Actively classify E-core-resident tasks on a dedicated P-core"
+    depends on IPC_CLASSES && GENERIC_ENTRY
+    default n
+    help
+      E-cores do not report Intel Thread Director classifications, so a
+      task that only ever runs on an E-core is never classified and stays
+      invisible to IPC-class-aware placement.
+
+      This dedicates one P-core (never cpu 0) to an active classifier: for
+      each E-core-resident single-threaded task it forks a throwaway COW
+      shadow clone, runs it briefly on the dedicated core so the hardware
+      can classify it, then destroys it and copies the resulting class back
+      to the real task. The shadow clone is killed on its first syscall so
+      it can never produce a side effect.
+
+      The dedicated core is removed from all scheduling domains and pinned
+      to its minimum frequency. Assumes SMT is off (nosmt).
+
+      If unsure, say N.
+
+config IPC_CLASSES_SHADOW_DEFER_COW
+    bool "Defer shadow COW cost from the real task onto the shadow"
+    depends on IPC_CLASSES_ACTIVE_CLASSIFIER && MMU
+    default n
+    help
+      A shadow clone is an ordinary COW fork, so while it is alive every
+      write the *real* task makes to a still-shared page costs that task a
+      full copy-on-write break: allocate a page, copy 4KB into it, wire it
+      into rmap and the LRU. Shadows typically die in well under a
+      millisecond having touched almost nothing, so the real task - often a
+      latency-sensitive system daemon - usually pays that price for a
+      snapshot nobody ever reads.
+
+      This inverts who pays. On such a write the real task only preserves
+      the old page contents into a bare "stash" page and keeps writing to
+      the original page in place; the shadow's page table entry is
+      retargeted to that stash. Only if the shadow actually faults on the
+      address does it pay to turn the stash into a real anonymous page.
+      A shadow that dies first has its stash freed without that ever
+      happening.
+
+      This adds a new special (non-present) page table entry type and
+      requires one task's fault handler to reach into another task's page
+      tables, so it touches core VM code. It is additionally gated at
+      runtime by a static key that defaults to off; see
+      /sys/kernel/debug/ipcc_stash/.
+
+      If unsure, say N.
+
 config CC_IS_CLANG
 	def_bool $(success,test "$(cc-name)" = Clang)
 

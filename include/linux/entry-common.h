@@ -31,6 +31,12 @@
 # define ARCH_SYSCALL_WORK_EXIT		(0)
 #endif
 
+#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
+# define IPCC_SHADOW_SYSCALL_WORK_ENTER	SYSCALL_WORK_IPCC_SHADOW
+#else
+# define IPCC_SHADOW_SYSCALL_WORK_ENTER	(0)
+#endif
+
 #define SYSCALL_WORK_ENTER	(SYSCALL_WORK_SECCOMP |			\
 				 SYSCALL_WORK_SYSCALL_TRACEPOINT |	\
 				 SYSCALL_WORK_SYSCALL_TRACE |		\
@@ -38,6 +44,7 @@
 				 SYSCALL_WORK_SYSCALL_AUDIT |		\
 				 SYSCALL_WORK_SYSCALL_USER_DISPATCH |	\
 				 SYSCALL_WORK_SYSCALL_RSEQ_SLICE |	\
+				 IPCC_SHADOW_SYSCALL_WORK_ENTER |	\
 				 ARCH_SYSCALL_WORK_ENTER)
 #define SYSCALL_WORK_EXIT	(SYSCALL_WORK_SYSCALL_TRACEPOINT |	\
 				 SYSCALL_WORK_SYSCALL_TRACE |		\
@@ -81,6 +88,18 @@ static inline void syscall_enter_audit(struct pt_regs *regs, long syscall)
 static __always_inline long syscall_trace_enter(struct pt_regs *regs, unsigned long work)
 {
 	long syscall, ret = 0;
+
+#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
+	/*
+	 * IPC-class shadow tasks are throwaway COW clones that exist only to
+	 * be classified by Intel Thread Director. They must never produce a
+	 * side effect, so the very first syscall attempt kills them. This is
+	 * checked before every other work item: once the shadow diverges from
+	 * what the real task would do, the sample is worthless anyway.
+	 */
+	if (work & SYSCALL_WORK_IPCC_SHADOW)
+		ipcc_shadow_syscall_denied();
+#endif
 
 	/*
 	 * Handle Syscall User Dispatch.  This must comes first, since

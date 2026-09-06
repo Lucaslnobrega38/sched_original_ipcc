@@ -517,6 +517,11 @@ struct sched_avg {
 	unsigned long			runnable_avg;
 	unsigned long			util_avg;
 	unsigned int			util_est;
+
+	#ifdef CONFIG_IPC_CLASSES
+	unsigned long load_avg_ipcc;
+	#endif
+
 } ____cacheline_aligned;
 
 /*
@@ -816,7 +821,11 @@ struct kmap_ctrl {
 #endif
 };
 
-
+#ifdef CONFIG_IPC_CLASSES
+#define NR_IPC_CLASSES		5
+#define IPCC_WEIGHT_SCALE	1024	
+#define IPCC_WEIGHT_SHIFT	4	
+#endif
 
 struct task_struct {
 
@@ -842,6 +851,67 @@ struct task_struct {
 	unsigned short		ipcc;		/* confirmed class (0 = unclassified) */
 	unsigned short		ipcc_prev;	/* previous candidate from MSR */
 	unsigned char		ipcc_stable_count; /* consecutive identical readings */
+	/*
+	 * How many times in a row update_ipcc_class_weights() has nudged the
+	 * vector below for the *current* class (i.e. ticks since debounce
+	 * last committed, reset whenever the confirmed class changes).
+	 * Saturates rather than wraps - only ever consumed capped at a small
+	 * bound (see ipcc_geometric_blend(), sched_ipcc_classifier.c), so
+	 * anything past that is indistinguishable from "fully converged"
+	 * anyway.
+	 *
+	 * Exists because shadow-classified and directly-classified tasks
+	 * confirm classes at wildly different rates: a real P-core-resident
+	 * task gets nudged every user tick, continuously, for as long as it
+	 * runs there; a shadow gets its entire confirmed history compressed
+	 * into one ~50ms dwell burst. Copying that burst into a target's own
+	 * vector as if it were a single tick's evidence would systematically
+	 * under-react to it - this lets the copy-back weight the blend by how
+	 * much evidence the shadow actually accumulated.
+	 */
+	unsigned char		ipcc_confirm_count;
+	/*
+	 * EWMA distribution of how much of this task's recent runtime was
+	 * spent in each ipcc class (index 0 = unclassified, always 0, never
+	 * nudged; indices 1..NR_IPC_CLASSES-1 = hw class + 1). CPU-independent
+	 * by construction: it is a property of the task's instruction mix, not
+	 * of any specific core, so it can be evaluated against any candidate
+	 * cpu's score table (see ipcc_weighted_score()).
+	 */
+	unsigned short		ipcc_class_weight[NR_IPC_CLASSES];
+#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
+	/*
+	 * Set by ipcc_shadow_syscall_denied() right before it kills a shadow
+	 * clone that attempted a syscall. Zero for every real task (only
+	 * shadows ever carry SYSCALL_WORK_IPCC_SHADOW, so only shadows can
+	 * reach that call), and zero for a shadow that has not hit a syscall
+	 * yet - including one that never does and gets reaped at the end of
+	 * its full dwell window. Lets sched_ipcc_classifier.c tell "died
+	 * early to a syscall" apart from "lived the whole dwell but never
+	 * converged", which look identical without it.
+	 */
+	ktime_t			ipcc_shadow_died_at;
+	/*
+	 * The instant this task's classifier "lag" is measured from: its
+	 * fork time initially, then re-stamped to now() every time it
+	 * actually consumes a turn (ipcc_shadow_fork_work(), fork completed -
+	 * whether or not the shadow went on to classify anything). Lag itself
+	 * is ktime_get() - this, computed where it's used rather than stored:
+	 * it starts at 0 for a brand-new task and grows for as long as the
+	 * task goes without another turn.
+	 *
+	 * This is what ipcc_classify_eligible() and ipcc_classify_submit()
+	 * use to rank candidates: whoever has gone longest since their last
+	 * turn goes first, a FIFO by real elapsed wait rather than by how
+	 * often a task happens to be curr at a tick. Zeroing at fork keeps a
+	 * newborn task from outranking everyone by virtue of never having
+	 * been touched yet; re-stamping on every consumed turn (success or
+	 * not) is what stops a frequently-woken task from walking back into
+	 * a slot the moment it frees up, since a turn is what "waiting" means
+	 * here, not whether it paid off.
+	 */
+	ktime_t			ipcc_shadow_last_turn;
+#endif
 #endif
 
 	void				*stack;
@@ -2338,6 +2408,25 @@ static inline int sched_core_idle_cpu(int cpu) { return idle_cpu(cpu); }
 #endif
 
 extern void sched_set_stop_task(int cpu, struct task_struct *stop);
+
+#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
+/*
+ * Terminate an IPC-class shadow task that attempted a syscall. Called from
+ * syscall_trace_enter(); does not return.
+ */
+void __noreturn ipcc_shadow_syscall_denied(void);
+
+/*
+ * arch/x86/kernel/sched_ipcc_classifier.c: called from intel_update_ipcc()
+ * for whichever task is genuinely rq->curr on an E-core at this user tick.
+ * May kick off a shadow-fork classification cycle for @curr; always
+ * returns immediately (never sleeps, safe with IRQs disabled).
+ */
+void ipcc_classify_tick(struct task_struct *curr, int cpu);
+
+/* Diagnostic-only accessor, see intel_update_ipcc() in sched_ipcc.c. */
+int ipcc_get_classifier_cpu(void);
+#endif
 
 #ifdef CONFIG_MEM_ALLOC_PROFILING
 static __always_inline struct alloc_tag *alloc_tag_save(struct alloc_tag *tag)

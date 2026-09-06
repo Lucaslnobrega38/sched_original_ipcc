@@ -69,6 +69,7 @@
 #include <linux/proc_fs.h>
 #include <linux/profile.h>
 #include <linux/rmap.h>
+#include <linux/ipcc_stash.h>
 #include <linux/ksm.h>
 #include <linux/acct.h>
 #include <linux/userfaultfd_k.h>
@@ -1089,6 +1090,7 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 	mm_init_aio(mm);
 	mm_init_owner(mm, p);
 	mm_pasid_init(mm);
+	ipcc_stash_mm_init(mm);
 	RCU_INIT_POINTER(mm->exe_file, NULL);
 	mmu_notifier_subscriptions_init(mm);
 	init_tlb_flush_pending(mm);
@@ -2544,6 +2546,825 @@ fork_out:
 	spin_unlock_irq(&current->sighand->siglock);
 	return ERR_PTR(retval);
 }
+
+#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
+/*
+ * shadow_copy_process - copy_process() variant for IPC-class shadow clones
+ *
+ * This is a deliberate full copy of copy_process() above, kept structurally
+ * identical to it so that it can be diffed against the original and evolved
+ * independently. It lives here rather than in the classifier because
+ * copy_process()'s helpers (dup_task_struct(), copy_mm(), copy_files(),
+ * copy_sighand(), ...) are static to this file.
+ *
+ * Only two things differ from copy_process(); both are marked below:
+ *
+ *  1) The child is parented to @reaper instead of to current.
+ *  2) The child gets SYSCALL_WORK_IPCC_SHADOW, so its first syscall kills it.
+ *
+ * Everything the shadow needs in order to be a faithful sample of the task
+ * being classified - mm (COW), fds, creds, cgroup, rlimits, pgrp/session -
+ * still comes from current, exactly as in a real fork().
+ *
+ * Must be called with current == the task being sampled (the shadow's memory
+ * and credentials are copied from current), IRQs enabled, and no locks held.
+ */
+static __latent_entropy struct task_struct *shadow_copy_process(
+					struct task_struct *reaper,
+					struct pid *pid,
+					int trace,
+					int node,
+					struct kernel_clone_args *args)
+{
+	int pidfd = -1, retval;
+	struct task_struct *p;
+	struct multiprocess_signals delayed;
+	struct file *pidfile = NULL;
+	const u64 clone_flags = args->flags;
+	struct nsproxy *nsp = current->nsproxy;
+
+	/*
+	 * Don't allow sharing the root directory with processes in a different
+	 * namespace
+	 */
+	if ((clone_flags & (CLONE_NEWNS|CLONE_FS)) == (CLONE_NEWNS|CLONE_FS))
+		return ERR_PTR(-EINVAL);
+
+	if ((clone_flags & (CLONE_NEWUSER|CLONE_FS)) == (CLONE_NEWUSER|CLONE_FS))
+		return ERR_PTR(-EINVAL);
+
+	/*
+	 * Thread groups must share signals as well, and detached threads
+	 * can only be started up within the thread group.
+	 */
+	if ((clone_flags & CLONE_THREAD) && !(clone_flags & CLONE_SIGHAND))
+		return ERR_PTR(-EINVAL);
+
+	/*
+	 * Shared signal handlers imply shared VM. By way of the above,
+	 * thread groups also imply shared VM. Blocking this case allows
+	 * for various simplifications in other code.
+	 */
+	if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
+		return ERR_PTR(-EINVAL);
+
+	/*
+	 * Siblings of global init remain as zombies on exit since they are
+	 * not reaped by their parent (swapper). To solve this and to avoid
+	 * multi-rooted process trees, prevent global and container-inits
+	 * from creating siblings.
+	 */
+	if ((clone_flags & CLONE_PARENT) &&
+				current->signal->flags & SIGNAL_UNKILLABLE)
+		return ERR_PTR(-EINVAL);
+
+	/*
+	 * If the new process will be in a different pid or user namespace
+	 * do not allow it to share a thread group with the forking task.
+	 */
+	if (clone_flags & CLONE_THREAD) {
+		if ((clone_flags & (CLONE_NEWUSER | CLONE_NEWPID)) ||
+		    (task_active_pid_ns(current) != nsp->pid_ns_for_children))
+			return ERR_PTR(-EINVAL);
+	}
+
+	if (clone_flags & CLONE_PIDFD) {
+		/*
+		 * - CLONE_DETACHED is blocked so that we can potentially
+		 *   reuse it later for CLONE_PIDFD.
+		 */
+		if (clone_flags & CLONE_DETACHED)
+			return ERR_PTR(-EINVAL);
+	}
+
+	/*
+	 * Force any signals received before this point to be delivered
+	 * before the fork happens.  Collect up signals sent to multiple
+	 * processes that happen during the fork and delay them so that
+	 * they appear to happen after the fork.
+	 */
+	sigemptyset(&delayed.signal);
+	INIT_HLIST_NODE(&delayed.node);
+
+	spin_lock_irq(&current->sighand->siglock);
+	if (!(clone_flags & CLONE_THREAD))
+		hlist_add_head(&delayed.node, &current->signal->multiprocess);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
+	retval = -ERESTARTNOINTR;
+	if (task_sigpending(current))
+		goto fork_out;
+
+	retval = -ENOMEM;
+	p = dup_task_struct(current, node);
+	if (!p)
+		goto fork_out;
+	p->flags &= ~PF_KTHREAD;
+	if (args->kthread)
+		p->flags |= PF_KTHREAD;
+	if (args->user_worker) {
+		/*
+		 * Mark us a user worker, and block any signal that isn't
+		 * fatal or STOP
+		 */
+		p->flags |= PF_USER_WORKER;
+		siginitsetinv(&p->blocked, sigmask(SIGKILL)|sigmask(SIGSTOP));
+	}
+	if (args->io_thread)
+		p->flags |= PF_IO_WORKER;
+
+	if (args->name)
+		strscpy_pad(p->comm, args->name, sizeof(p->comm));
+
+	p->set_child_tid = (clone_flags & CLONE_CHILD_SETTID) ? args->child_tid : NULL;
+	/*
+	 * TID is cleared in mm_release() when the task exits
+	 */
+	p->clear_child_tid = (clone_flags & CLONE_CHILD_CLEARTID) ? args->child_tid : NULL;
+
+	ftrace_graph_init_task(p);
+
+	rt_mutex_init_task(p);
+
+	lockdep_assert_irqs_enabled();
+#ifdef CONFIG_PROVE_LOCKING
+	DEBUG_LOCKS_WARN_ON(!p->softirqs_enabled);
+#endif
+	retval = copy_creds(p, clone_flags);
+	if (retval < 0)
+		goto bad_fork_free;
+
+	retval = -EAGAIN;
+	if (is_rlimit_overlimit(task_ucounts(p), UCOUNT_RLIMIT_NPROC, rlimit(RLIMIT_NPROC))) {
+		if (p->real_cred->user != INIT_USER &&
+		    !capable(CAP_SYS_RESOURCE) && !capable(CAP_SYS_ADMIN))
+			goto bad_fork_cleanup_count;
+	}
+	current->flags &= ~PF_NPROC_EXCEEDED;
+
+	/*
+	 * If multiple threads are within copy_process(), then this check
+	 * triggers too late. This doesn't hurt, the check is only there
+	 * to stop root fork bombs.
+	 */
+	retval = -EAGAIN;
+	if (data_race(nr_threads >= max_threads))
+		goto bad_fork_cleanup_count;
+
+	delayacct_tsk_init(p);	/* Must remain after dup_task_struct() */
+	p->flags &= ~(PF_SUPERPRIV | PF_WQ_WORKER | PF_IDLE | PF_NO_SETAFFINITY);
+	p->flags |= PF_FORKNOEXEC;
+	INIT_LIST_HEAD(&p->children);
+	INIT_LIST_HEAD(&p->sibling);
+	rcu_copy_process(p);
+	p->vfork_done = NULL;
+	spin_lock_init(&p->alloc_lock);
+
+	init_sigpending(&p->pending);
+
+	p->utime = p->stime = p->gtime = 0;
+#ifdef CONFIG_ARCH_HAS_SCALED_CPUTIME
+	p->utimescaled = p->stimescaled = 0;
+#endif
+	prev_cputime_init(&p->prev_cputime);
+
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
+	seqcount_init(&p->vtime.seqcount);
+	p->vtime.starttime = 0;
+	p->vtime.state = VTIME_INACTIVE;
+#endif
+
+#ifdef CONFIG_IO_URING
+	p->io_uring = NULL;
+	retval = io_uring_fork(p);
+	if (unlikely(retval))
+		goto bad_fork_cleanup_delayacct;
+	retval = -EAGAIN;
+#endif
+
+	p->default_timer_slack_ns = current->timer_slack_ns;
+
+#ifdef CONFIG_PSI
+	p->psi_flags = 0;
+#endif
+
+	task_io_accounting_init(&p->ioac);
+	acct_clear_integrals(p);
+
+	posix_cputimers_init(&p->posix_cputimers);
+	tick_dep_init_task(p);
+
+	p->io_context = NULL;
+	audit_set_context(p, NULL);
+	cgroup_fork(p);
+	if (args->kthread) {
+		if (!set_kthread_struct(p))
+			goto bad_fork_cleanup_delayacct;
+	}
+#ifdef CONFIG_NUMA
+	p->mempolicy = mpol_dup(p->mempolicy);
+	if (IS_ERR(p->mempolicy)) {
+		retval = PTR_ERR(p->mempolicy);
+		p->mempolicy = NULL;
+		goto bad_fork_cleanup_delayacct;
+	}
+#endif
+#ifdef CONFIG_CPUSETS
+	p->cpuset_mem_spread_rotor = NUMA_NO_NODE;
+	seqcount_spinlock_init(&p->mems_allowed_seq, &p->alloc_lock);
+#endif
+#ifdef CONFIG_TRACE_IRQFLAGS
+	memset(&p->irqtrace, 0, sizeof(p->irqtrace));
+	p->irqtrace.hardirq_disable_ip	= _THIS_IP_;
+	p->irqtrace.softirq_enable_ip	= _THIS_IP_;
+	p->softirqs_enabled		= 1;
+	p->softirq_context		= 0;
+#endif
+
+	p->pagefault_disabled = 0;
+
+	lockdep_init_task(p);
+
+	p->blocked_on = NULL; /* not blocked yet */
+
+#ifdef CONFIG_BCACHE
+	p->sequential_io	= 0;
+	p->sequential_io_avg	= 0;
+#endif
+#ifdef CONFIG_BPF_SYSCALL
+	RCU_INIT_POINTER(p->bpf_storage, NULL);
+	p->bpf_ctx = NULL;
+#endif
+
+	unwind_task_init(p);
+
+	/* Perform scheduler related setup. Assign this task to a CPU. */
+	retval = sched_fork(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_policy;
+
+	retval = perf_event_init_task(p, clone_flags);
+	if (retval)
+		goto bad_fork_sched_cancel_fork;
+	retval = audit_alloc(p);
+	if (retval)
+		goto bad_fork_cleanup_perf;
+	/* copy all the process information */
+	shm_init_task(p);
+	retval = security_task_alloc(p, clone_flags);
+	if (retval)
+		goto bad_fork_cleanup_audit;
+	retval = copy_semundo(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_security;
+	retval = copy_files(clone_flags, p, args->no_files);
+	if (retval)
+		goto bad_fork_cleanup_semundo;
+	/*
+	 * SHADOW FORK DIFFERENCE: no copy_fs() at all.
+	 *
+	 * ->fs is root and cwd: pure path-resolution state, reachable only
+	 * through syscalls - and a shadow is killed on its first syscall
+	 * attempt, before any other syscall work runs (see
+	 * syscall_trace_enter()). Copying it therefore buys nothing and costs
+	 * a kmem_cache_alloc plus a path_get() on both root and pwd.
+	 * exit_fs() tolerates NULL, so teardown is unaffected.
+	 *
+	 * This removes a crash outright rather than merely avoiding work: when
+	 * a target exits with our task_work still queued, exit_task_work() runs
+	 * it after exit_fs() has already cleared current->fs, and copy_fs()
+	 * would then call copy_fs_struct(NULL), which dereferences old->umask
+	 * unconditionally. That oopsed repeatedly before the PF_EXITING guard
+	 * in ipcc_shadow_fork_work() was added to stop the callback getting
+	 * this far; not making the call is the version of that fix which cannot
+	 * be bypassed.
+	 */
+	p->fs = NULL;
+	retval = copy_sighand(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_fs;
+	retval = copy_signal(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_sighand;
+	retval = copy_mm(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_signal;
+	retval = copy_namespaces(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_mm;
+	retval = copy_io(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_namespaces;
+	retval = copy_thread(p, args);
+	if (retval)
+		goto bad_fork_cleanup_io;
+
+	stackleak_task_init(p);
+
+	if (pid != &init_struct_pid) {
+		pid = alloc_pid(p->nsproxy->pid_ns_for_children, args->set_tid,
+				args->set_tid_size);
+		if (IS_ERR(pid)) {
+			retval = PTR_ERR(pid);
+			goto bad_fork_cleanup_thread;
+		}
+	}
+
+	/*
+	 * This has to happen after we've potentially unshared the file
+	 * descriptor table (so that the pidfd doesn't leak into the child
+	 * if the fd table isn't shared).
+	 */
+	if (clone_flags & CLONE_PIDFD) {
+		int flags = (clone_flags & CLONE_THREAD) ? PIDFD_THREAD : 0;
+
+		/*
+		 * Note that no task has been attached to @pid yet indicate
+		 * that via CLONE_PIDFD.
+		 */
+		retval = pidfd_prepare(pid, flags | PIDFD_STALE, &pidfile);
+		if (retval < 0)
+			goto bad_fork_free_pid;
+		pidfd = retval;
+
+		retval = put_user(pidfd, args->pidfd);
+		if (retval)
+			goto bad_fork_put_pidfd;
+	}
+
+#ifdef CONFIG_BLOCK
+	p->plug = NULL;
+#endif
+	futex_init_task(p);
+
+	/*
+	 * sigaltstack should be cleared when sharing the same VM
+	 */
+	if ((clone_flags & (CLONE_VM|CLONE_VFORK)) == CLONE_VM)
+		sas_ss_reset(p);
+
+	/*
+	 * Syscall tracing and stepping should be turned off in the
+	 * child regardless of CLONE_PTRACE.
+	 */
+	user_disable_single_step(p);
+	clear_task_syscall_work(p, SYSCALL_TRACE);
+#if defined(CONFIG_GENERIC_ENTRY) || defined(TIF_SYSCALL_EMU)
+	clear_task_syscall_work(p, SYSCALL_EMU);
+#endif
+	clear_tsk_latency_tracing(p);
+
+	/*
+	 * SHADOW FORK DIFFERENCE 1/2: arm the syscall trap.
+	 *
+	 * The shadow exists only to have its instruction mix classified. It
+	 * must never produce an externally visible side effect, so its very
+	 * first syscall attempt terminates it (see syscall_trace_enter()).
+	 * Setting this here means it is armed before the child has had any
+	 * chance to execute a single user instruction.
+	 */
+	set_task_syscall_work(p, IPCC_SHADOW);
+
+	/* ok, now we should be set up.. */
+	p->pid = pid_nr(pid);
+	if (clone_flags & CLONE_THREAD) {
+		p->group_leader = current->group_leader;
+		p->tgid = current->tgid;
+	} else {
+		p->group_leader = p;
+		p->tgid = p->pid;
+	}
+
+	p->nr_dirtied = 0;
+	p->nr_dirtied_pause = 128 >> (PAGE_SHIFT - 10);
+	p->dirty_paused_when = 0;
+
+	p->pdeath_signal = 0;
+	p->task_works = NULL;
+	clear_posix_cputimers_work(p);
+
+#ifdef CONFIG_KRETPROBES
+	p->kretprobe_instances.first = NULL;
+#endif
+#ifdef CONFIG_RETHOOK
+	p->rethooks.first = NULL;
+#endif
+
+	/*
+	 * Ensure that the cgroup subsystem policies allow the new process to be
+	 * forked. It should be noted that the new process's css_set can be changed
+	 * between here and cgroup_post_fork() if an organisation operation is in
+	 * progress.
+	 */
+	retval = cgroup_can_fork(p, args);
+	if (retval)
+		goto bad_fork_put_pidfd;
+
+	/*
+	 * Now that the cgroups are pinned, re-clone the parent cgroup and put
+	 * the new task on the correct runqueue. All this *before* the task
+	 * becomes visible.
+	 *
+	 * This isn't part of ->can_fork() because while the re-cloning is
+	 * cgroup specific, it unconditionally needs to place the task on a
+	 * runqueue.
+	 */
+	retval = sched_cgroup_fork(p, args);
+	if (retval)
+		goto bad_fork_cancel_cgroup;
+
+	/*
+	 * Allocate a default futex hash for the user process once the first
+	 * thread spawns.
+	 */
+	if (need_futex_hash_allocate_default(clone_flags)) {
+		retval = futex_hash_allocate_default();
+		if (retval)
+			goto bad_fork_cancel_cgroup;
+		/*
+		 * If we fail beyond this point we don't free the allocated
+		 * futex hash map. We assume that another thread will be created
+		 * and makes use of it. The hash map will be freed once the main
+		 * thread terminates.
+		 */
+	}
+	/*
+	 * From this point on we must avoid any synchronous user-space
+	 * communication until we take the tasklist-lock. In particular, we do
+	 * not want user-space to be able to predict the process start-time by
+	 * stalling fork(2) after we recorded the start_time but before it is
+	 * visible to the system.
+	 */
+
+	p->start_time = ktime_get_ns();
+	p->start_boottime = ktime_get_boottime_ns();
+
+	/*
+	 * Make it visible to the rest of the system, but dont wake it up yet.
+	 * Need tasklist lock for parent etc handling!
+	 */
+	write_lock_irq(&tasklist_lock);
+
+	/*
+	 * SHADOW FORK DIFFERENCE 2/2: parent to @reaper, not to current.
+	 *
+	 * This is what keeps the shadow invisible to the task being sampled.
+	 * The shadow never enters current->children, so the sampled task
+	 * cannot see it (ps, /proc) and cannot reap it via wait() even by
+	 * accident - which would otherwise hand it a SIGCHLD and an exit
+	 * status for a pid it never forked.
+	 *
+	 * Reaping then comes for free: @reaper is a kthread with SIGCHLD set
+	 * to SIG_IGN, so do_notify_parent() takes the autoreap path and
+	 * exit_notify() releases the shadow through the ordinary
+	 * release_task() route with no extra bookkeeping.
+	 *
+	 * exit_signal must be SIGCHLD here: -1 trips a WARN_ON_ONCE in
+	 * do_notify_parent() and 0 would skip the SIG_IGN autoreap check.
+	 *
+	 * The CLONE_PARENT/CLONE_THREAD branch of copy_process() is dropped:
+	 * a shadow is always a fresh, standalone, single-threaded process.
+	 */
+	p->real_parent = reaper;
+	p->parent_exec_id = reaper->self_exec_id;
+	p->exit_signal = SIGCHLD;
+
+	klp_copy_process(p);
+
+	sched_core_fork(p);
+
+	spin_lock(&current->sighand->siglock);
+
+	rv_task_fork(p);
+
+	rseq_fork(p, clone_flags);
+
+	/* Don't start children in a dying pid namespace */
+	if (unlikely(!(ns_of_pid(pid)->pid_allocated & PIDNS_ADDING))) {
+		retval = -ENOMEM;
+		goto bad_fork_core_free;
+	}
+
+	/* Let kill terminate clone/fork in the middle */
+	if (fatal_signal_pending(current)) {
+		retval = -EINTR;
+		goto bad_fork_core_free;
+	}
+
+	/* No more failure paths after this point. */
+
+	/*
+	 * Copy seccomp details explicitly here, in case they were changed
+	 * before holding sighand lock.
+	 */
+	copy_seccomp(p);
+
+	init_task_pid_links(p);
+	if (likely(p->pid)) {
+		ptrace_init_task(p, (clone_flags & CLONE_PTRACE) || trace);
+
+		init_task_pid(p, PIDTYPE_PID, pid);
+		if (thread_group_leader(p)) {
+			init_task_pid(p, PIDTYPE_TGID, pid);
+			init_task_pid(p, PIDTYPE_PGID, task_pgrp(current));
+			init_task_pid(p, PIDTYPE_SID, task_session(current));
+
+			if (is_child_reaper(pid)) {
+				ns_of_pid(pid)->child_reaper = p;
+				p->signal->flags |= SIGNAL_UNKILLABLE;
+			}
+			p->signal->shared_pending.signal = delayed.signal;
+			p->signal->tty = tty_kref_get(current->signal->tty);
+			/*
+			 * Inherit has_child_subreaper flag under the same
+			 * tasklist_lock with adding child to the process tree
+			 * for propagate_has_child_subreaper optimization.
+			 */
+			p->signal->has_child_subreaper = p->real_parent->signal->has_child_subreaper ||
+							 p->real_parent->signal->is_child_subreaper;
+			list_add_tail(&p->sibling, &p->real_parent->children);
+			list_add_tail_rcu(&p->tasks, &init_task.tasks);
+			attach_pid(p, PIDTYPE_TGID);
+			attach_pid(p, PIDTYPE_PGID);
+			attach_pid(p, PIDTYPE_SID);
+			__this_cpu_inc(process_counts);
+		} else {
+			current->signal->nr_threads++;
+			current->signal->quick_threads++;
+			atomic_inc(&current->signal->live);
+			refcount_inc(&current->signal->sigcnt);
+			task_join_group_stop(p);
+			list_add_tail_rcu(&p->thread_node,
+					  &p->signal->thread_head);
+		}
+		attach_pid(p, PIDTYPE_PID);
+		nr_threads++;
+	}
+	total_forks++;
+	hlist_del_init(&delayed.node);
+	spin_unlock(&current->sighand->siglock);
+	syscall_tracepoint_update(p);
+	write_unlock_irq(&tasklist_lock);
+
+	if (pidfile)
+		fd_install(pidfd, pidfile);
+
+	proc_fork_connector(p);
+	sched_post_fork(p);
+	cgroup_post_fork(p, args);
+	perf_event_fork(p);
+
+	trace_task_newtask(p, clone_flags);
+	uprobe_copy_process(p, clone_flags);
+	user_events_fork(p, clone_flags);
+
+	copy_oom_score_adj(clone_flags, p);
+
+	return p;
+
+bad_fork_core_free:
+	sched_core_free(p);
+	spin_unlock(&current->sighand->siglock);
+	write_unlock_irq(&tasklist_lock);
+bad_fork_cancel_cgroup:
+	cgroup_cancel_fork(p, args);
+bad_fork_put_pidfd:
+	if (clone_flags & CLONE_PIDFD) {
+		fput(pidfile);
+		put_unused_fd(pidfd);
+	}
+bad_fork_free_pid:
+	if (pid != &init_struct_pid)
+		free_pid(pid);
+bad_fork_cleanup_thread:
+	exit_thread(p);
+bad_fork_cleanup_io:
+	if (p->io_context)
+		exit_io_context(p);
+bad_fork_cleanup_namespaces:
+	exit_nsproxy_namespaces(p);
+bad_fork_cleanup_mm:
+	if (p->mm) {
+		sched_mm_cid_exit(p);
+		mm_clear_owner(p->mm, p);
+		mmput(p->mm);
+	}
+bad_fork_cleanup_signal:
+	if (!(clone_flags & CLONE_THREAD))
+		free_signal_struct(p->signal);
+bad_fork_cleanup_sighand:
+	__cleanup_sighand(p->sighand);
+bad_fork_cleanup_fs:
+	exit_fs(p); /* blocking; ->fs is always NULL here, see above */
+	/*
+	 * No bad_fork_cleanup_files label: nothing can fail between
+	 * copy_files() and here anymore now that copy_fs() is gone, so
+	 * nothing jumps to it. The cleanup itself still runs, by
+	 * fall-through, for the failures further down.
+	 */
+	exit_files(p); /* blocking */
+bad_fork_cleanup_semundo:
+	exit_sem(p);
+bad_fork_cleanup_security:
+	security_task_free(p);
+bad_fork_cleanup_audit:
+	audit_free(p);
+bad_fork_cleanup_perf:
+	perf_event_free_task(p);
+bad_fork_sched_cancel_fork:
+	sched_cancel_fork(p);
+bad_fork_cleanup_policy:
+	lockdep_free_task(p);
+#ifdef CONFIG_NUMA
+	mpol_put(p->mempolicy);
+#endif
+bad_fork_cleanup_delayacct:
+	io_uring_free(p);
+	delayacct_tsk_free(p);
+bad_fork_cleanup_count:
+	dec_rlimit_ucounts(task_ucounts(p), UCOUNT_RLIMIT_NPROC, 1);
+	exit_cred_namespaces(p);
+	exit_creds(p);
+bad_fork_free:
+	WRITE_ONCE(p->__state, TASK_DEAD);
+	exit_task_stack_account(p);
+	put_task_stack(p);
+	delayed_free_task(p);
+fork_out:
+	spin_lock_irq(&current->sighand->siglock);
+	hlist_del_init(&delayed.node);
+	spin_unlock_irq(&current->sighand->siglock);
+	return ERR_PTR(retval);
+}
+
+/**
+ * shadow_kernel_clone - create an IPC-class shadow clone of current
+ * @reaper: kthread that owns and reaps the shadow (must ignore SIGCHLD)
+ * @cpu: the classifier cpu this shadow is bound to
+ *
+ * Trimmed analogue of kernel_clone() for shadow clones: no pidfd, no vfork,
+ * no CLONE_PARENT_SETTID, no ptrace fork events - none of which apply to a
+ * task that userspace does not know exists.
+ *
+ * Returns the shadow *parked*: pinned to @cpu but left in TASK_NEW, never
+ * woken, so it sits on no runqueue and burns nothing. The caller starts it
+ * with wake_up_new_task() when its observation turn actually begins.
+ *
+ * That split is the whole point. Shadows are forked well ahead of their turn
+ * (to keep the classifier core fed back-to-back rather than idling), but only
+ * one may ever *run* on the classifier cpu at a time - ITD classification is
+ * per-core, so two would blend into one noisy reading. Waking at fork time
+ * instead was tried and reverted: it does not hold a queued shadow still, it
+ * just lets CFS place it on some E-core where it competes with the real
+ * workload it was cloned from. Pinning at fork time without this parking was
+ * equally wrong in the other direction - every pending shadow piled onto the
+ * classifier cpu at once and timeshared against the one actually dwelling.
+ *
+ * Parking gets both: the fork cost is paid early, and exactly one shadow is
+ * ever runnable. Same pattern io_uring uses for its workers - see
+ * create_io_thread() above and io_init_new_worker() (io_uring/io-wq.c), which
+ * likewise set affinity on a still-TASK_NEW task and wake it later, from a
+ * context that is not the forking one. With nr_cpus_allowed == 1 the eventual
+ * wake needs no migration: select_task_rq() takes cpumask_any(p->cpus_ptr)
+ * without consulting current, so the shadow materialises straight onto @cpu.
+ *
+ * Must be called with current == the task to be sampled, from a context that
+ * may sleep and holds no locks (a task_work callback), since copy_process()
+ * requires IRQs enabled and does GFP_KERNEL allocations.
+ *
+ * Returns the shadow with a reference held for the caller, which must be
+ * dropped with put_task_struct(). On failure returns an ERR_PTR; note that
+ * -ERESTARTNOINTR/-EINTR simply mean current had a signal pending and the
+ * fork should be retried later.
+ */
+struct task_struct *shadow_kernel_clone(struct task_struct *reaper, int cpu)
+{
+	struct kernel_clone_args args = {
+		.exit_signal = SIGCHLD,
+		/*
+		 * A shadow dies on its first syscall attempt, before any other
+		 * syscall work runs (see syscall_trace_enter()), so everything
+		 * that exists purely to serve syscalls is unreachable in it and
+		 * copying it is pure cost. no_files makes copy_files() leave
+		 * ->files NULL instead of running dup_fd(), which would
+		 * otherwise allocate an fdtable and take a reference on every
+		 * single fd the target has open. CLONE_CLEAR_SIGHAND resets
+		 * inherited handlers to SIG_DFL: a throwaway must not be able
+		 * to run the target's signal handlers.
+		 */
+		.no_files = 1,
+		.flags = CLONE_CLEAR_SIGHAND,
+	};
+	struct task_struct *p;
+	int retval;
+
+	p = shadow_copy_process(reaper, NULL, 0, NUMA_NO_NODE, &args);
+	add_latent_entropy();
+
+	if (IS_ERR(p))
+		return p;
+
+	/*
+	 * Undo copy_thread()'s "the child returns 0 from fork()".
+	 *
+	 * copy_thread() (arch/x86/kernel/process.c) ends with
+	 *
+	 *	*childregs = *current_pt_regs();
+	 *	childregs->ax = 0;
+	 *
+	 * which is right for a real fork(): the parent is *inside* the fork
+	 * syscall there, so RAX is nothing but the syscall's return slot and
+	 * zeroing it is how the child learns it is the child.
+	 *
+	 * A shadow is not born in a syscall. It is born wherever the target
+	 * happened to be when it ran our task_work in resume_user_mode_work(),
+	 * and since the request is injected from sched_tick(), that is usually
+	 * the *interrupt* return path - i.e. in the middle of arbitrary user
+	 * code, with RAX holding a live value. Zeroing it there corrupts a
+	 * register the shadow is about to use, and the shadow promptly dies on
+	 * a garbage pointer: observed in the wild as a shadow segfaulting at
+	 * address 0x10 on "mov %rdx,0x10(%rax)" - RAX having been clobbered to
+	 * 0 right here.
+	 *
+	 * That is not just a lost sample. A segfault is a loud, externally
+	 * visible side effect - it spawns systemd-coredump against a process
+	 * userspace was never supposed to be able to see - which is exactly
+	 * what a shadow must never produce.
+	 *
+	 * Restoring the target's real RAX is what makes the shadow a faithful
+	 * continuation of the target rather than a corrupted one. orig_ax
+	 * needs no such care: on the IRQ path the CPU leaves it negative
+	 * (~vector), which already tells the signal code there is no syscall
+	 * to restart, and on the syscall-exit path it is the real syscall
+	 * number, matching the RAX we just put back.
+	 */
+	task_pt_regs(p)->ax = current_pt_regs()->ax;
+
+	/*
+	 * Belt and braces for the same "no visible side effects" rule: even if
+	 * a shadow does manage to die on a fatal signal for some reason other
+	 * than the SIGKILL we send it, it must not leave a core dump behind.
+	 * copy_signal() gave it its own signal_struct with a private copy of
+	 * the rlimits, so this affects nothing but the shadow.
+	 */
+	p->signal->rlim[RLIMIT_CORE].rlim_cur = 0;
+
+	trace_sched_process_fork(current, p);
+
+	if (IS_ENABLED(CONFIG_LRU_GEN_WALKS_MMU)) {
+		/* lock the task to synchronize with memcg migration */
+		task_lock(p);
+		lru_gen_add_mm(p->mm);
+		task_unlock(p);
+	}
+
+	/*
+	 * Register the shadow's mm against the target's before the shadow can
+	 * run, so a write fault taken by the target can never see a shadow
+	 * that is already executing but not yet linked. current is the target
+	 * here (shadow_kernel_clone() runs in its task_work context), and
+	 * copy_mm() gave the shadow its own COW mm since clone_flags has no
+	 * CLONE_VM.
+	 *
+	 * No unwind needed on a later failure: p->mm is released through
+	 * mmput() -> exit_mmap(), which is where the unlink lives, so every
+	 * teardown path is covered by construction rather than by matching
+	 * error labels here.
+	 */
+	if (p->mm && current->mm)
+		ipcc_stash_link_shadow(p->mm, current->mm);
+
+	/* Reference handed to the caller; see put_task_struct() in the doc. */
+	get_task_struct(p);
+
+	/*
+	 * Bind, but do not wake - see this function's doc comment. Safe on a
+	 * TASK_NEW task: it is on no runqueue, so this only rewrites the mask
+	 * and leaves nr_cpus_allowed at 1.
+	 */
+	retval = set_cpus_allowed_ptr(p, cpumask_of(cpu));
+	if (retval) {
+		/*
+		 * Only reachable if the classifier cpu went inactive between
+		 * being chosen and here. copy_process() cannot be undone, so
+		 * the shadow has to die instead: signal first, then wake, so
+		 * it comes up with a fatal signal already pending and exits in
+		 * ret_from_fork without running a single userspace
+		 * instruction. Waking is not optional - a parked TASK_NEW task
+		 * ignores SIGKILL entirely (TASK_NEW is not in the
+		 * TASK_WAKEKILL | TASK_INTERRUPTIBLE mask try_to_wake_up()
+		 * tests), so kill-without-wake would leak it forever.
+		 */
+		WARN_ON_ONCE(1);
+		send_sig(SIGKILL, p, 1);
+		wake_up_new_task(p);
+		put_task_struct(p);
+		return ERR_PTR(retval);
+	}
+
+	return p;
+}
+#endif /* CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER */
 
 static inline void init_idle_pids(struct task_struct *idle)
 {

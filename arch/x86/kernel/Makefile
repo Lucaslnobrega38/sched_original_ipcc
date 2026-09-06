@@ -157,6 +157,7 @@ obj-$(CONFIG_X86_CET)			+= cet.o
 obj-$(CONFIG_X86_USER_SHADOW_STACK)	+= shstk.o
 
 obj-$(CONFIG_IPC_CLASSES)		+= sched_ipcc.o
+obj-$(CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER)	+= sched_ipcc_classifier.o
 
 ###
 # 64 bit specific files

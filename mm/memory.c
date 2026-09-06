@@ -52,6 +52,7 @@
 #include <linux/pagemap.h>
 #include <linux/memremap.h>
 #include <linux/kmsan.h>
+#include <linux/ipcc_stash.h>
 #include <linux/ksm.h>
 #include <linux/rmap.h>
 #include <linux/export.h>
@@ -4230,6 +4231,11 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 	/*
 	 * Ok, we need to copy. Oh, well..
 	 */
+
+	/* Measurement only, no behaviour change - see the helper. */
+	if (folio && folio_test_anon(folio))
+		ipcc_stash_note_parent_wp_copy(vma->vm_mm);
+
 	if (folio)
 		folio_get(folio);
 

@@ -1371,6 +1371,35 @@ struct mm_struct {
 #ifdef CONFIG_MM_ID
 		mm_id_t mm_id;
 #endif /* CONFIG_MM_ID */
+#ifdef CONFIG_IPC_CLASSES_SHADOW_DEFER_COW
+		/*
+		 * Linkage between an IPCC classifier shadow clone's mm and the
+		 * mm of the real task it was cloned from. Both directions are
+		 * needed: the write-fault path walks target -> shadows to find
+		 * whose page tables to retarget, and teardown walks shadow ->
+		 * target to unlink itself.
+		 *
+		 * A given mm only ever uses one direction. A real task's mm
+		 * populates @ipcc_shadows (possibly several shadows at once:
+		 * ipcc_evict() SIGKILLs a superseded shadow without waiting for
+		 * it to die, so an evicted-but-unreaped shadow can coexist with
+		 * its replacement). A shadow's mm populates @ipcc_shadow_of and
+		 * @ipcc_shadow_node, and can never itself gain shadows, since a
+		 * shadow is killed on its first syscall and so can never reach
+		 * clone().
+		 *
+		 * @ipcc_shadow_of holds an mmgrab() (mm_count), not an mmget()
+		 * (mm_users): what must stay alive is the target mm_struct's
+		 * storage, so the shadow can unlink from the list even if the
+		 * target itself has already exited. Liveness of the target's
+		 * *page tables* is a separate question, answered where it
+		 * matters with mmget_not_zero().
+		 */
+		struct list_head ipcc_shadows;
+		spinlock_t ipcc_shadows_lock;
+		struct list_head ipcc_shadow_node;
+		struct mm_struct *ipcc_shadow_of;
+#endif /* CONFIG_IPC_CLASSES_SHADOW_DEFER_COW */
 	} __randomize_layout;
 
 	/*

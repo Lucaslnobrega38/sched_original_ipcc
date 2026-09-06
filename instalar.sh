@@ -26,7 +26,7 @@ version ${VERSION}
 machine-id ${MACHINE_ID}
 linux   /${MACHINE_ID}/${VERSION}/linux
 initrd  /${MACHINE_ID}/${VERSION}/initrd
-options nvme_load=YES nowatchdog rw root=UUID=94a96fe0-4ff2-4d7a-8a06-de97b249506a systemd.machine_id=${MACHINE_ID}
+options nvme_load=YES nowatchdog rw nosmt=force root=UUID=94a96fe0-4ff2-4d7a-8a06-de97b249506a systemd.machine_id=${MACHINE_ID}
 EOF
 
 echo "Kernel ${VERSION} instalado."

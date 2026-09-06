@@ -47,6 +47,17 @@ struct mm_struct init_mm = {
 #ifdef CONFIG_SCHED_MM_CID
 	.mm_cid.lock = __RAW_SPIN_LOCK_UNLOCKED(init_mm.mm_cid.lock),
 #endif
+#ifdef CONFIG_IPC_CLASSES_SHADOW_DEFER_COW
+	/*
+	 * init_mm is statically initialised and never passes through
+	 * mm_init(), so it does not get ipcc_stash_mm_init(). Without this an
+	 * all-zero list_head would make list_empty() report false - i.e. "has
+	 * shadows" - for a mm that can never have any.
+	 */
+	.ipcc_shadows	= LIST_HEAD_INIT(init_mm.ipcc_shadows),
+	.ipcc_shadows_lock = __SPIN_LOCK_UNLOCKED(init_mm.ipcc_shadows_lock),
+	.ipcc_shadow_node = LIST_HEAD_INIT(init_mm.ipcc_shadow_node),
+#endif
 	.flexible_array	= MM_STRUCT_FLEXIBLE_ARRAY_INIT,
 	INIT_MM_CONTEXT(init_mm)
 };

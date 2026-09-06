@@ -42,6 +42,7 @@
 #include <linux/cpuidle.h>
 #include <linux/interrupt.h>
 #include <linux/memory-tiers.h>
+#include <linux/timer.h>
 #include <linux/mempolicy.h>
 #include <linux/mutex_api.h>
 #include <linux/profile.h>
@@ -2098,6 +2099,7 @@ struct task_numa_env {
 
 static unsigned long cpu_load(struct rq *rq);
 static unsigned long cpu_runnable(struct rq *rq);
+static unsigned long cpu_util(int cpu, struct task_struct *p, int dst_cpu, int boost);
 
 static inline enum
 numa_type numa_classify(unsigned int imbalance_pct,
@@ -4574,7 +4576,7 @@ static void migrate_se_pelt_lag(struct sched_entity *se) {}
 static inline int
 update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
 {
-	unsigned long removed_load = 0, removed_util = 0, removed_runnable = 0;
+	unsigned long removed_load = 0, removed_util = 0, removed_runnable = 0, removed_load_ipcc = 0;
 	struct sched_avg *sa = &cfs_rq->avg;
 	int decayed = 0;
 
@@ -4586,6 +4588,9 @@ update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
 		swap(cfs_rq->removed.util_avg, removed_util);
 		swap(cfs_rq->removed.load_avg, removed_load);
 		swap(cfs_rq->removed.runnable_avg, removed_runnable);
+#ifdef CONFIG_IPC_CLASSES
+		swap(cfs_rq->removed.load_avg_ipcc, removed_load_ipcc);
+#endif
 		cfs_rq->removed.nr = 0;
 		raw_spin_unlock(&cfs_rq->removed.lock);
 
@@ -4598,6 +4603,16 @@ update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
 		r = removed_runnable;
 		__update_sa(sa, runnable, -r, -r*divider);
 
+#ifdef CONFIG_IPC_CLASSES
+		/*
+		 * load_avg_ipcc is unsigned and, unlike the regular avgs, is not
+		 * decayed and is recomputed (via apply_ipcc_weight, whose
+		 * multiplier drifts with the task's class-weight vector) at
+		 * remove time. The queued removal can therefore exceed this rq's
+		 * current ipcc contribution, so clamp instead of wrapping.
+		 */
+		lsub_positive(&cfs_rq->avg.load_avg_ipcc, removed_load_ipcc);
+#endif
 		/*
 		 * removed_runnable is the unweighted version of removed_load so we
 		 * can use it to estimate removed_load_sum.
@@ -4614,6 +4629,30 @@ update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
 			   sa->last_update_time);
 	return decayed;
 }
+
+#ifdef CONFIG_IPC_CLASSES
+static inline unsigned long apply_ipcc_weight(struct task_struct *p, int cpu, unsigned long util);
+
+static void sync_entity_load_avg_ipcc(struct sched_entity *se,struct cfs_rq *cfs_rq)
+{
+	if (sched_ipcc_enabled()) {
+			if (entity_is_task(se)) {
+				struct task_struct *p = task_of(se);
+				int cpu = cpu_of(rq_of(cfs_rq));
+
+				// se->avg.util_avg_ipcc = apply_ipcc_weight(p, cpu, se->avg.util_avg);
+				se->avg.load_avg_ipcc = apply_ipcc_weight(p, cpu, se->avg.load_avg);
+			} else {
+				struct cfs_rq *gcfs_rq = group_cfs_rq(se);
+
+				// se->avg.util_avg_ipcc = gcfs_rq->avg.util_avg_ipcc;
+				se->avg.load_avg_ipcc = gcfs_rq->avg.load_avg_ipcc;
+			}
+		}
+}
+#else
+static void sync_entity_load_avg_ipcc(struct sched_entity *se,struct cfs_rq *cfs_rq){}
+#endif 
 
 /**
  * attach_entity_load_avg - attach this entity to its cfs_rq load avg
@@ -4658,6 +4697,15 @@ static void attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 		se->avg.load_sum = 1;
 
 	enqueue_load_avg(cfs_rq, se);
+
+	if (sched_ipcc_enabled())
+	{
+		sync_entity_load_avg_ipcc(se, cfs_rq);
+#ifdef CONFIG_IPC_CLASSES
+		cfs_rq->avg.load_avg_ipcc += se->avg.load_avg_ipcc;
+#endif
+	}
+
 	cfs_rq->avg.util_avg += se->avg.util_avg;
 	cfs_rq->avg.util_sum += se->avg.util_sum;
 	cfs_rq->avg.runnable_avg += se->avg.runnable_avg;
@@ -4681,6 +4729,12 @@ static void attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 static void detach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	dequeue_load_avg(cfs_rq, se);
+
+#ifdef CONFIG_IPC_CLASSES
+	/* Unsigned and drift-prone (see update_cfs_rq_load_avg); clamp. */
+	lsub_positive(&cfs_rq->avg.load_avg_ipcc, se->avg.load_avg_ipcc);
+#endif
+
 	__update_sa(&cfs_rq->avg, util, -se->avg.util_avg, -se->avg.util_sum);
 	__update_sa(&cfs_rq->avg, runnable, -se->avg.runnable_avg, -se->avg.runnable_sum);
 
@@ -4742,17 +4796,21 @@ static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 	}
 }
 
+
+
 /*
  * Synchronize entity load avg of dequeued entity without locking
  * the previous rq.
  */
-static void sync_entity_load_avg(struct sched_entity *se)
+static void sync_entity_load_avg(struct sched_entity *se)  
 {
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
 	u64 last_update_time;
 
 	last_update_time = cfs_rq_last_update_time(cfs_rq);
 	__update_load_avg_blocked_se(last_update_time, se);
+
+	sync_entity_load_avg_ipcc(se,cfs_rq);
 }
 
 /*
@@ -4777,6 +4835,9 @@ static void remove_entity_load_avg(struct sched_entity *se)
 	cfs_rq->removed.util_avg	+= se->avg.util_avg;
 	cfs_rq->removed.load_avg	+= se->avg.load_avg;
 	cfs_rq->removed.runnable_avg	+= se->avg.runnable_avg;
+#ifdef CONFIG_IPC_CLASSES
+	cfs_rq->removed.load_avg_ipcc += se->avg.load_avg_ipcc;
+#endif
 	raw_spin_unlock_irqrestore(&cfs_rq->removed.lock, flags);
 }
 
@@ -5055,11 +5116,270 @@ static inline int util_fits_cpu(unsigned long util,  // função fits, important
 	return fits;
 }
 
+static inline unsigned long apply_ipcc_weight_inv(struct task_struct *p,int cpu,unsigned long util)
+{
+	unsigned long baseline = arch_get_ipcc_baseline();
+	unsigned long score = ipcc_weighted_score(p, cpu);
+
+	if (!baseline || !score)
+		return util;
+	return util * score / baseline;
+}
+
+static inline unsigned long apply_ipcc_weight(struct task_struct *p,int cpu,unsigned long util)
+{
+	unsigned long baseline = arch_get_ipcc_baseline();
+	unsigned long score = ipcc_weighted_score(p, cpu);
+
+	if (!baseline || !score)
+		return util;
+	return util * baseline / score;
+}
+
+#ifdef CONFIG_IPC_CLASSES
+/*
+ * ipcc_best_pcore_cpu - the cpu a task should be measured *against*: the
+ * strongest core in the system, and among equally strong ones the
+ * highest-ITMT-priority (favored) one
+ *
+ * Latched once and then frozen - what it reflects (topology, per-core peak
+ * capability, ITMT ranking) does not meaningfully reorder at runtime - but
+ * deliberately *not* computed in an initcall. Both inputs arrive later and
+ * asynchronously than an initcall can rely on: the HFI score tables are
+ * filled in when the thermal/HFI instance first publishes them, and ITMT
+ * priorities are written per-cpu by the pstate driver as each cpufreq
+ * policy initializes (intel_pstate.c: intel_pstate_set_itmt_prio(), which
+ * the driver's own comment notes can run during CPU online). Latching from
+ * the periodic refresh instead means a boot that is not ready yet simply
+ * retries in 500ms, and costs nothing once it has succeeded.
+ *
+ * ITMT priority alone must not decide this. Its generic fallback is
+ * arch_asym_cpu_priority() { return -cpu; }, and before the pstate driver
+ * has run, x86's version returns an unset (zero) per-cpu value - either way
+ * "highest priority" degenerates to cpu0, which is only a P-core by
+ * accident of enumeration order. So the P-core *set* is identified first by
+ * peak HFI score (E-cores score strictly lower for every class - the same
+ * signal the shadow classifier is built on), and ITMT only breaks ties
+ * within that set, which is exactly the case it is meaningful for (picking
+ * a favored core out of otherwise identical P-cores).
+ *
+ * -1 until successfully latched, or forever if this hardware exposes no
+ * usable HFI scores at all; ipcc_misfit_weight() treats -1 as "no reference
+ * available, do not bias anything".
+ */
+static int ipcc_best_pcore_cpu __read_mostly = -1;
+
+/* Highest score @cpu reaches over all classes; 0 if HFI has nothing yet. */
+static unsigned long ipcc_cpu_peak_score(int cpu)
+{
+	unsigned long peak = 0;
+	int i, score;
+
+	for (i = 1; i < NR_IPC_CLASSES; i++) {
+		score = arch_get_ipcc_score(i, cpu);
+		if (score > 0)
+			peak = max(peak, (unsigned long)score);
+	}
+
+	return peak;
+}
+
+static void ipcc_latch_best_pcore(void)
+{
+	unsigned long top_score = 0;
+	int cpu, best = -1, best_prio = INT_MIN;
+
+	for_each_online_cpu(cpu)
+		top_score = max(top_score, ipcc_cpu_peak_score(cpu));
+
+	/* HFI tables not published yet - leave unlatched, retry next period. */
+	if (!top_score)
+		return;
+
+	for_each_online_cpu(cpu) {
+		int prio;
+
+		if (ipcc_cpu_peak_score(cpu) < top_score)
+			continue;
+
+		prio = arch_asym_cpu_priority(cpu);
+		if (prio > best_prio) {
+			best_prio = prio;
+			best = cpu;
+		}
+	}
+
+	WRITE_ONCE(ipcc_best_pcore_cpu, best);
+}
+
+/*
+ * ipcc_system_load - how tight P-core capacity currently is, as an integer
+ * exponent tier in [1, IPCC_MAX_EXP]
+ *
+ * 1 means "P-cores are not scarce, but a genuinely misplaced task should
+ * still be offered the move - it costs nothing when there is room";
+ * IPCC_MAX_EXP means "P-cores are essentially saturated, discriminate as
+ * hard as the formula allows between classes that would benefit from one
+ * and classes that would not". Refreshed on a periodic timer rather than
+ * computed inline where it is used: unlike ipcc_best_pcore_cpu this reflects
+ * genuinely time-varying system state, but summing free capacity over every
+ * P-core on every misfit check (which happens every tick, per curr task)
+ * would repeat the same small scan far more often than the underlying
+ * number can usefully change.
+ *
+ * The exponent tops out at 3 rather than something larger because the ratio
+ * being raised is already substantial on real hardware (peak-class P-core
+ * score 92 vs a flat 34 on every E-core class here, so ~2.7x): a cap of 3
+ * lands the strongest bias around ~20x, enough to make a badly-placed
+ * vector task unambiguously misfit, while a larger cap runs into hundreds
+ * of x, at which point every E-core task is permanently misfit and the
+ * signal stops distinguishing anything.
+ */
+static unsigned long ipcc_system_load __read_mostly = 1;
+
+#define IPCC_MAX_EXP		3
+#define IPCC_LOAD_PERIOD_MS	500
+
+static void ipcc_refresh_system_load(struct timer_list *t);
+/*
+ * Deferrable: this re-arms forever, and nothing here is worth waking an
+ * otherwise fully idle cpu for every period just to observe that the
+ * system is still idle. On an idle system the tier it would compute is
+ * the resting minimum anyway.
+ */
+static struct timer_list ipcc_load_timer =
+	__TIMER_INITIALIZER(ipcc_refresh_system_load, TIMER_DEFERRABLE);
+
+static void ipcc_refresh_system_load(struct timer_list *t)
+{
+	unsigned long max_cap = 0, free = 0, total = 0;
+	unsigned long free_permille, tier;
+	int cpu;
+
+	/* One-shot in practice: retries only until HFI/ITMT are both ready. */
+	if (READ_ONCE(ipcc_best_pcore_cpu) < 0)
+		ipcc_latch_best_pcore();
+
+	for_each_online_cpu(cpu)
+		max_cap = max(max_cap, capacity_of(cpu));
+
+	if (!max_cap)
+		goto out;
+
+	/*
+	 * All P-cores share the same (highest) capacity_of() on this
+	 * hardware - see ipcc_best_pcore_cpu's comment for why that signal
+	 * cannot pick *a* favored core, but it is exactly the right signal
+	 * to pick the *set* of P-cores, which is all this needs here.
+	 */
+	for_each_online_cpu(cpu) {
+		unsigned long cap = capacity_of(cpu);
+		unsigned long util;
+
+		if (cap != max_cap)
+			continue;
+
+		util = min(cap, cpu_util(cpu, NULL, -1, 0));
+		total += cap;
+		free += cap - util;
+	}
+
+	if (!total)
+		goto out;
+
+	free_permille = free * 1000 / total;
+	/*
+	 * Always at least 1, never 0: even with plenty of free P-core
+	 * capacity, a task that is genuinely misplaced should still be
+	 * offered the move - moving it costs nothing when there is room.
+	 * The exponent's job is to decide how *hard* to fight over placement
+	 * as capacity gets scarce, not whether to bother at all.
+	 */
+	tier = 1 + ((1000 - free_permille) * (IPCC_MAX_EXP - 1)) / 1000;
+	WRITE_ONCE(ipcc_system_load, tier);
+
+out:
+	mod_timer(&ipcc_load_timer, jiffies + msecs_to_jiffies(IPCC_LOAD_PERIOD_MS));
+}
+
+static int __init ipcc_start_system_load_timer(void)
+{
+	mod_timer(&ipcc_load_timer, jiffies + msecs_to_jiffies(IPCC_LOAD_PERIOD_MS));
+	return 0;
+}
+late_initcall(ipcc_start_system_load_timer);
+
+/*
+ * ipcc_misfit_weight - like apply_ipcc_weight(), but for deciding whether a
+ * task should be considered misfit on the cpu it is *already* on
+ *
+ * apply_ipcc_weight(p, cpu, util) evaluated at @cpu directly is what
+ * task_fits_cpu() used to call unconditionally - correct when @cpu is a
+ * P-core (its score table genuinely differentiates by class), but on this
+ * hardware's E-cores every class reports the same HFI score, so the ratio
+ * collapses to a constant regardless of @p's actual class mix: misfit
+ * would trigger (or not) identically for a vector-heavy task and a
+ * scalar-only one, which defeats the point of tracking class at all.
+ *
+ * This instead compares @p's *achievable* score on ipcc_best_pcore_cpu
+ * against its score on @cpu right now - a ratio that is properly
+ * class-differentiated regardless of what @cpu's own HFI table looks like,
+ * since it never depends on @cpu differentiating anything itself. That
+ * ratio is then raised to ipcc_system_load: when P-core capacity is not
+ * scarce, the exponent is 0 and this returns @util completely unbiased (no
+ * artificial pressure to move anything when there is nowhere it needs to
+ * go); as P-cores get tighter, the bias grows, and grows fastest for
+ * exactly the classes with the most to gain from a P-core - a task whose
+ * mix does about as well anywhere (ratio close to 1) stays close to
+ * unbiased at any exponent, since 1^k is always 1.
+ */
+static inline unsigned long ipcc_misfit_weight(struct task_struct *p, int cpu,
+						unsigned long util)
+{
+	unsigned long score_cur, score_best, ratio_permille, f_permille;
+	unsigned int k;
+	int best;
+
+	/*
+	 * Sampled once into a local: ipcc_best_pcore_cpu is latched from the
+	 * refresh timer, so a plain re-read between the guard below and its
+	 * use as a cpu index would not be guaranteed to observe the same
+	 * value twice.
+	 */
+	best = READ_ONCE(ipcc_best_pcore_cpu);
+	if (best < 0 || cpu == best)
+		return util;
+
+	score_cur = ipcc_weighted_score(p, cpu);
+	if (!score_cur)
+		return util;
+
+	score_best = ipcc_weighted_score(p, best);
+	if (!score_best || score_best <= score_cur)
+		return util;
+
+	ratio_permille = score_best * 1000 / score_cur;
+
+	f_permille = 1000;
+	k = READ_ONCE(ipcc_system_load);
+	while (k-- > 0)
+		f_permille = (f_permille * ratio_permille) / 1000;
+
+	return util * f_permille / 1000;
+}
+#endif /* CONFIG_IPC_CLASSES */
+
 static inline int task_fits_cpu(struct task_struct *p, int cpu)
 {
 	unsigned long uclamp_min = uclamp_eff_value(p, UCLAMP_MIN);
 	unsigned long uclamp_max = uclamp_eff_value(p, UCLAMP_MAX);
 	unsigned long util = task_util_est(p);
+
+#ifdef CONFIG_IPC_CLASSES
+		if (sched_ipcc_enabled())
+			util = ipcc_misfit_weight(p, cpu, util);
+#endif
+
 	/*
 	 * Return true only if the cpu fully fits the task requirements, which
 	 * include the utilization but also the performance hints.
@@ -5527,6 +5847,76 @@ static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 	cfs_rq->curr = NULL;
 }
 
+#ifdef CONFIG_IPC_CLASSES
+/*
+ * update_entity_load_avg_ipcc - refresh @se's ipcc-weighted load and
+ * propagate the delta into @cfs_rq's aggregate
+ *
+ * Called from entity_tick() for every level of @se's ancestry, once per
+ * tick - unlike the single-leaf-only refresh this replaced (used to live
+ * directly in kernel/sched/core.c's sched_tick()), this reaches the root
+ * cfs_rq the load balancer actually reads every tick, by riding the same
+ * for_each_sched_entity() walk task_tick_fair() already does for ordinary
+ * PELT accounting, rather than only updating on enqueue/dequeue.
+ *
+ * At a task leaf, the fresh value comes from ipcc_weighted_score() against
+ * @se's own class-weight vector - same formula and same direction as
+ * apply_ipcc_weight() (a poor fit inflates the ipcc load), must stay in sync
+ * with attach/sync time or this per-tick rewrite would flip the aggregate's
+ * meaning. At a group level there is no task to score - just roll up
+ * whatever the child cfs_rq's aggregate currently holds, the same thing
+ * sync_entity_load_avg_ipcc() already does for group entities at attach/
+ * detach time, just running every tick here instead of only then.
+ */
+static void update_entity_load_avg_ipcc(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	unsigned long new_ipcc_load;
+	long delta;
+
+	if (!sched_ipcc_enabled())
+		return;
+
+	if (entity_is_task(se)) {
+		struct task_struct *p = task_of(se);
+		unsigned long baseline = arch_get_ipcc_baseline();
+		unsigned long score = ipcc_weighted_score(p, task_cpu(p));
+
+		if (!baseline || !score)
+			return;
+
+		new_ipcc_load = se->avg.load_avg * baseline / score;
+	} else {
+		struct cfs_rq *gcfs_rq = group_cfs_rq(se);
+
+		new_ipcc_load = READ_ONCE(gcfs_rq->avg.load_avg_ipcc);
+	}
+
+	delta = (long)new_ipcc_load - (long)se->avg.load_avg_ipcc;
+	if (!delta)
+		return;
+
+	/*
+	 * Highest-frequency writer of cfs_rq->avg.load_avg_ipcc (every user
+	 * tick, at every level, for whichever task is curr) and not
+	 * naturally covered by an enqueue/dequeue-side rq lock shared with
+	 * the reader - the load balancer peeks this same field from other
+	 * cpus without taking this rq's lock (see the READ_ONCE call sites
+	 * in fair.c: update_sg_lb_stats, find_src_rq, cpu_load_without_ipcc).
+	 * WRITE_ONCE here is this write's half of that contract.
+	 */
+	if (delta >= 0)
+		WRITE_ONCE(cfs_rq->avg.load_avg_ipcc, cfs_rq->avg.load_avg_ipcc + delta);
+	else if (cfs_rq->avg.load_avg_ipcc > (unsigned long)(-delta))
+		WRITE_ONCE(cfs_rq->avg.load_avg_ipcc, cfs_rq->avg.load_avg_ipcc - (unsigned long)(-delta));
+	else
+		WRITE_ONCE(cfs_rq->avg.load_avg_ipcc, 0);
+
+	se->avg.load_avg_ipcc = new_ipcc_load;
+}
+#else
+static inline void update_entity_load_avg_ipcc(struct cfs_rq *cfs_rq, struct sched_entity *se) {}
+#endif
+
 static void
 entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 {
@@ -5540,6 +5930,8 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	 */
 	update_load_avg(cfs_rq, curr, UPDATE_TG);
 	update_cfs_group(curr);
+
+	update_entity_load_avg_ipcc(cfs_rq, curr);
 
 #ifdef CONFIG_SCHED_HRTICK
 	/*
@@ -7181,6 +7573,57 @@ static unsigned long cpu_load(struct rq *rq)
 	return cfs_rq_load_avg(&rq->cfs);
 }
 
+#ifdef CONFIG_IPC_CLASSES
+
+static void update_cfs_rq_h_load(struct cfs_rq *cfs_rq);
+
+static unsigned long task_h_load_ipcc(struct task_struct *p)
+{
+	struct cfs_rq *cfs_rq = task_cfs_rq(p);
+
+	update_cfs_rq_h_load(cfs_rq);
+	return div64_ul(p->se.avg.load_avg_ipcc * cfs_rq->h_load,
+			cfs_rq->avg.load_avg_ipcc + 1);
+}
+
+/*
+ * cpu_load_without_ipcc - compute CPU ipcc-weighted load without any
+ * contribution from *p
+ * @rq: the rq which ipcc load is requested
+ * @p: the task which ipcc load should be discounted
+ *
+ * Same as cpu_load_without(), but using load_avg_ipcc instead of load_avg.
+ */
+static unsigned long cpu_load_without_ipcc(struct rq *rq, struct task_struct *p)
+{
+	unsigned long load;
+
+	/* Task has no contribution or is new */
+	if (cpu_of(rq) != task_cpu(p) || !READ_ONCE(p->se.avg.last_update_time))
+		return READ_ONCE(rq->cfs.avg.load_avg_ipcc);
+
+	load = READ_ONCE(rq->cfs.avg.load_avg_ipcc);
+
+	/* Discount task's ipcc load from CPU's ipcc load */
+	lsub_positive(&load, task_h_load_ipcc(p));
+
+	return load;
+}
+#else /* !CONFIG_IPC_CLASSES */
+static inline unsigned long task_h_load_ipcc(struct task_struct *p)
+{
+	return task_h_load(p);
+}
+
+static unsigned long cpu_load_without(struct rq *rq, struct task_struct *p);
+
+static inline unsigned long cpu_load_without_ipcc(struct rq *rq, struct task_struct *p)
+{
+	return cpu_load_without(rq, p);
+}
+#endif
+
+
 /*
  * cpu_load_without - compute CPU load without any contributions from *p
  * @cpu: the CPU which load is requested
@@ -7445,7 +7888,8 @@ sched_balance_find_dst_group_cpu(struct sched_group *group, struct task_struct *
 				shallowest_idle_cpu = i;
 			}
 		} else if (shallowest_idle_cpu == -1) {
-			load = cpu_load(cpu_rq(i));
+			
+			load = cpu_load(cpu_rq(i)); 
 			if (load < min_load) {
 				min_load = load;
 				least_loaded_cpu = i;
@@ -7481,12 +7925,14 @@ static inline int sched_balance_find_dst_cpu(struct sched_domain *sd, struct tas
 			continue;
 		}
 
+		// alterar pra usar ipcc
 		group = sched_balance_find_dst_group(sd, p, cpu);
 		if (!group) {
 			sd = sd->child;
 			continue;
 		}
 
+		// alterar pra usar ipcc
 		new_cpu = sched_balance_find_dst_group_cpu(group, p, cpu);
 		if (new_cpu == cpu) {
 			/* Now try balancing at a lower domain level of 'cpu': */
@@ -7775,8 +8221,17 @@ select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
 static inline bool asym_fits_cpu(unsigned long util,
 				 unsigned long util_min,
 				 unsigned long util_max,
-				 int cpu)
+				 int cpu,
+				struct task_struct *p)
 {
+	if (sched_ipcc_enabled())
+	{
+		util = apply_ipcc_weight(p,cpu,util);
+
+		return (util_fits_cpu(util, util_min, util_max, cpu) > 0);
+	}
+
+
 	if (sched_asym_cpucap_active())
 		/*
 		 * Return true only if the cpu fully fits the task requirements
@@ -7790,21 +8245,12 @@ static inline bool asym_fits_cpu(unsigned long util,
 /*
  * Try and locate an idle core/thread in the LLC cache domain.
  */
-static int select_idle_sibling(struct task_struct *p, int prev, int target) // fast path, att     tenta encontrar idle perto antes de target não idle
-
+static int select_idle_sibling(struct task_struct *p, int prev, int target)
 {
 	bool has_idle_core = false;
 	struct sched_domain *sd;
-	unsigned long task_util, util_min, util_max; // heurística de util
+	unsigned long task_util, util_min, util_max;
 	int i, recent_used_cpu, prev_aff = -1;
-
-	// prioridade: target idle ->  prev idle -> recent idle -> cluster (de target)idle -> prev_smt idle -> idle qualquer
-	
-	// trocar a ordem de cluster e recent?
-
-	// nova prioridade: target idle ->  prev idle -> cluster (de target)idle -> recent idle -> prev_smt idle -> idle qualquer
-
-	// troquei, pois recent usa heurística de llc antes, o que pode ser não ideal 
 
 	/*
 	 * On asymmetric system, update task utilization because we will check
@@ -7823,7 +8269,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target) // f
 	lockdep_assert_irqs_disabled();
 
 	if ((available_idle_cpu(target) || sched_idle_cpu(target)) &&
-	    asym_fits_cpu(task_util, util_min, util_max, target)) // se cpu é idle e cabe no tipo de núcleo específico, early return
+	    asym_fits_cpu(task_util, util_min, util_max, target,p))
 		return target;
 
 	/*
@@ -7831,9 +8277,9 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target) // f
 	 */
 	if (prev != target && cpus_share_cache(prev, target) &&
 	    (available_idle_cpu(prev) || sched_idle_cpu(prev)) &&
-	    asym_fits_cpu(task_util, util_min, util_max, prev)) {
+	    asym_fits_cpu(task_util, util_min, util_max, prev,p)) {
 
-		if (!static_branch_unlikely(&sched_cluster_active) ||  // cluster inativo? tentar deixar dormindo?
+		if (!static_branch_unlikely(&sched_cluster_active) ||
 		    cpus_share_resources(prev, target))
 			return prev;
 
@@ -7852,10 +8298,27 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target) // f
 	    in_task() &&
 	    prev == smp_processor_id() &&
 	    this_rq()->nr_running <= 1 &&
-	    asym_fits_cpu(task_util, util_min, util_max, prev)) {
+	    asym_fits_cpu(task_util, util_min, util_max, prev,p)) {
 		return prev;
 	}
 
+	/* Check a recently used CPU as a potential idle candidate: */
+	recent_used_cpu = p->recent_used_cpu;
+	p->recent_used_cpu = prev;
+	if (recent_used_cpu != prev &&
+	    recent_used_cpu != target &&
+	    cpus_share_cache(recent_used_cpu, target) &&
+	    (available_idle_cpu(recent_used_cpu) || sched_idle_cpu(recent_used_cpu)) &&
+	    cpumask_test_cpu(recent_used_cpu, p->cpus_ptr) &&
+	    asym_fits_cpu(task_util, util_min, util_max, recent_used_cpu,p)) {
+
+		if (!static_branch_unlikely(&sched_cluster_active) ||
+		    cpus_share_resources(recent_used_cpu, target))
+			return recent_used_cpu;
+
+	} else {
+		recent_used_cpu = -1;
+	}
 
 	/*
 	 * For asymmetric CPU capacity systems, our domain of interest is
@@ -7877,36 +8340,6 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target) // f
 		}
 	}
 
-	/*
-	fluxo trocado.
-
-	verificar se isso não causa ping pong, pois algumas arquiteruras tem llc entre P e E, e é possível que uma task mais apropriada para P core 
-	viaje até um E core só pq ele tava idle, quando na verdade essa task obteria ipc super melhor no P. Isso iria desfazer toda a heurística
-
-	ideia: efficient...() faria uma busca grossa (mais permissiva), que em seguida é refinada por aqui.
-	*/
-
-	// rejeitar núcleos inapropriados com rigor aqui
-
-	/* Check a recently used CPU as a potential idle candidate: */ 
-	recent_used_cpu = p->recent_used_cpu;
-	p->recent_used_cpu = prev;
-	if (recent_used_cpu != prev &&
-	    recent_used_cpu != target &&
-	    cpus_share_cache(recent_used_cpu, target) &&
-	    (available_idle_cpu(recent_used_cpu) || sched_idle_cpu(recent_used_cpu)) &&
-	    cpumask_test_cpu(recent_used_cpu, p->cpus_ptr) &&
-	    asym_fits_cpu(task_util, util_min, util_max, recent_used_cpu)) {
-
-		if (!static_branch_unlikely(&sched_cluster_active) ||
-		    cpus_share_resources(recent_used_cpu, target))
-			return recent_used_cpu;
-
-	} else {
-		recent_used_cpu = -1;
-	}
-
-
 	sd = rcu_dereference_all(per_cpu(sd_llc, target));
 	if (!sd)
 		return target;
@@ -7914,7 +8347,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target) // f
 	if (sched_smt_active()) {
 		has_idle_core = test_idle_cores(target);
 
-		if (!has_idle_core && cpus_share_cache(prev, target)) {  // sempre tenta o smt de prev
+		if (!has_idle_core && cpus_share_cache(prev, target)) {
 			i = select_idle_smt(p, sd, prev);
 			if ((unsigned int)i < nr_cpumask_bits)
 				return i;
@@ -8556,7 +8989,7 @@ unlock:
  * Returns the target CPU number.
  */
 static int
-select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)// mudar aqui?
+select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 {
 	int sync = (wake_flags & WF_SYNC) && !(current->flags & PF_EXITING);
 	struct sched_domain *tmp, *sd = NULL;
@@ -8602,7 +9035,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)// mudar
 		if (want_affine && (tmp->flags & SD_WAKE_AFFINE) &&
 		    cpumask_test_cpu(prev_cpu, sched_domain_span(tmp))) {
 			if (cpu != prev_cpu)
-				new_cpu = wake_affine(tmp, p, cpu, prev_cpu, sync); // se der errado vira prev_cpu
+				new_cpu = wake_affine(tmp, p, cpu, prev_cpu, sync);
 
 			sd = NULL; /* Prefer wake_affine over balance flags */
 			break;
@@ -9684,8 +10117,14 @@ static int detach_tasks(struct lb_env *env)
 			 * value. Make sure that env->imbalance decreases
 			 * otherwise detach_tasks() will stop only after
 			 * detaching up to loop_max tasks.
+			 *
+			 * env->imbalance is in ipcc-weighted currency (group_load
+			 * uses load_avg_ipcc), so pay it down in the same currency.
 			 */
-			load = max_t(unsigned long, task_h_load(p), 1);
+			if (sched_ipcc_enabled())
+				load = max_t(unsigned long, task_h_load_ipcc(p), 1);
+			else
+				load = max_t(unsigned long, task_h_load(p), 1);
 
 			if (sched_feat(LB_MIN) &&
 			    load < 16 && !env->sd->nr_balance_failed)
@@ -10034,11 +10473,15 @@ struct sg_lb_stats {
 #endif
 
 #ifdef CONFIG_IPC_CLASSES
-	unsigned long	min_score;	/* Min(score(rq->curr->ipcc)) */
-	unsigned short	min_ipcc;	/* Class of the task with the minimum IPCC score in the rq */
-	unsigned long	sum_score;	/* Sum(score(rq->curr->ipcc)) */
-	long		ipcc_score_after;  /* Prospective IPCC score after load balancing */
-	unsigned long	ipcc_score_before; /* IPCC score before load balancing */
+
+	// unsigned long	min_score;	/* Min(score(rq->curr->ipcc)) */
+	// unsigned short	min_ipcc;	/* Class of the task with the minimum IPCC score in the rq */
+	// unsigned long	sum_score;	/* Sum(score(rq->curr->ipcc)) */
+	// long		ipcc_score_after;  /* Prospective IPCC score after load balancing */
+	// unsigned long	ipcc_score_before; /* IPCC score before load balancing */
+
+	// unsigned long avg_load_ipcc;
+	// unsigned long group_load_ipcc;
 #endif
 };
 
@@ -10308,7 +10751,7 @@ group_type group_classify(unsigned int imbalance_pct,
 	return group_has_spare;
 }
 
-#ifdef CONFIG_IPC_CLASSES
+#if 0 /* CONFIG_IPC_CLASSES: original score-tiebreak mechanism, disabled */
 static void init_rq_ipcc_stats(struct sg_lb_stats *sgs)
 {
 	/* All IPCC stats have been set to zero in update_sg_lb_stats(). */
@@ -10704,13 +11147,21 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 	bool balancing_at_rd = !env->sd->parent;
 
 	memset(sgs, 0, sizeof(*sgs));
-	init_rq_ipcc_stats(sgs);
 
 	local_group = group == sds->local;
 
 	for_each_cpu_and(i, sched_group_span(group), env->cpus) {
 		struct rq *rq = cpu_rq(i);
-		unsigned long load = cpu_load(rq);
+		unsigned long load;
+
+#ifdef CONFIG_IPC_CLASSES
+		if (sched_ipcc_enabled())
+			load = READ_ONCE(rq->cfs.avg.load_avg_ipcc);
+		else
+			load = cpu_load(rq);
+#else
+		load = cpu_load(rq);
+#endif
 
 		sgs->group_load += load;
 		sgs->group_util += cpu_util_cfs(i);
@@ -10758,7 +11209,7 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 				sgs->group_misfit_task_load = load;
 		}
 
-		update_sg_lb_ipcc_stats(env->dst_cpu, sgs, rq);
+		// update_sg_lb_ipcc_stats(env->dst_cpu, sgs, rq);
 	}
 
 	sgs->group_capacity = group->sgc->capacity;
@@ -10846,25 +11297,8 @@ static bool update_sd_pick_busiest(struct lb_env *env,
 
 	case group_asym_packing:
 		/* Prefer to move from lowest priority CPU's work */
-		if (sched_asym_prefer(READ_ONCE(sg->asym_prefer_cpu),
-				      READ_ONCE(sds->busiest->asym_prefer_cpu)))
-			return false;
-		if (sched_asym_prefer(READ_ONCE(sds->busiest->asym_prefer_cpu),
-				      READ_ONCE(sg->asym_prefer_cpu)))
-			return true;
-
-		/*
-		 * Unlike other callers of sched_asym_prefer(), here both @sg
-		 * and @sds::busiest have tasks running. When they have equal
-		 * priority, their IPC class scores can be used to select a
-		 * better busiest.
-		 */
-		if (sched_asym_ipcc_pick(sds->busiest, sg, &sds->busiest_stat, sgs)) {
-			// trace_printk("ipcc_lb: tiebreaker fired in asym_packing\n");
-			return false;
-		}
-
-		break;
+		return sched_asym_prefer(READ_ONCE(sds->busiest->asym_prefer_cpu),
+				      READ_ONCE(sg->asym_prefer_cpu));
 
 	case group_misfit_task:
 		/*
@@ -10903,20 +11337,11 @@ static bool update_sd_pick_busiest(struct lb_env *env,
 			/*
 			 * SMT sched groups need more help than non-SMT groups.
 			 */
-			if (sds->busiest->flags & SD_SHARE_CPUCAPACITY) {
-				if (!(sg->flags & SD_SHARE_CPUCAPACITY))
+			if (sds->busiest->flags & SD_SHARE_CPUCAPACITY) 
 					return false;
 
-				/*
-				 * Between two SMT groups, use IPCC scores to pick the
-				 * one that would improve throughput the most (only
-				 * asym_packing uses IPCC scores for now).
-				 */
-				if (sched_ipcc_enabled() &&
-				    env->sd->flags & SD_ASYM_PACKING &&
-				    sched_asym_ipcc_prefer(busiest, sgs))
-					return false;
-			}
+
+			
 		}
 
 		break;
@@ -11064,7 +11489,11 @@ static inline void update_sg_wakeup_stats(struct sched_domain *sd,
 		struct rq *rq = cpu_rq(i);
 		unsigned int local;
 
-		sgs->group_load += cpu_load_without(rq, p);
+		if (sched_ipcc_enabled())
+			sgs->group_load += cpu_load_without_ipcc(rq,p);
+		else
+			sgs->group_load += cpu_load_without(rq, p);
+
 		sgs->group_util += cpu_util_without(i, p);
 		sgs->group_runnable += cpu_runnable_without(rq, p);
 		local = task_running_on_cpu(i, p);
@@ -11080,7 +11509,8 @@ static inline void update_sg_wakeup_stats(struct sched_domain *sd,
 			sgs->idle_cpus++;
 
 		/* Check if task fits in the CPU */
-		if (sd->flags & SD_ASYM_CPUCAPACITY &&
+		if ( ((sd->flags & SD_ASYM_CPUCAPACITY) ||
+			sched_ipcc_enabled()) &&
 		    sgs->group_misfit_task_load &&
 		    task_fits_cpu(p, i))
 			sgs->group_misfit_task_load = 0;
@@ -11234,6 +11664,9 @@ sched_balance_find_dst_group(struct sched_domain *sd, struct task_struct *p, int
 		/* Calculate allowed imbalance based on load */
 		imbalance = scale_load_down(NICE_0_LOAD) *
 				(sd->imbalance_pct-100) / 100;
+
+		// avaliar o quanto essa aproximação afeta grupos de tipos de cores diferentes
+		imbalance = apply_ipcc_weight_inv(p,local->asym_prefer_cpu,imbalance);
 
 		/*
 		 * When comparing groups across NUMA domains, it's possible for
@@ -11881,9 +12314,19 @@ static struct rq *sched_balance_find_src_rq(struct lb_env *env,
 		case migrate_load:
 			/*
 			 * When comparing with load imbalance, use cpu_load()
-			 * which is not scaled with the CPU capacity.
+			 * which is not scaled with the CPU capacity. Use the
+			 * ipcc-weighted aggregate to match the currency of
+			 * env->imbalance and of the group_load that selected
+			 * this rq's group as busiest.
 			 */
+#ifdef CONFIG_IPC_CLASSES
+			if (sched_ipcc_enabled())
+				load = READ_ONCE(rq->cfs.avg.load_avg_ipcc);
+			else
+				load = cpu_load(rq);
+#else
 			load = cpu_load(rq);
+#endif
 
 			if (nr_running == 1 && load > env->imbalance &&
 			    !check_cpu_capacity(rq, env->sd))
@@ -11930,27 +12373,6 @@ static struct rq *sched_balance_find_src_rq(struct lb_env *env,
 			if (busiest_nr < nr_running) {
 				busiest_nr = nr_running;
 				busiest = rq;
-
-				/*
-				 * Remember the IPCC score of the busiest
-				 * runqueue. We may need it to break a tie with
-				 * other queues with equal nr_running.
-				 */
-				busiest_ipcc_delta = ipcc_score_delta(busiest, env);
-			/*
-			 * For ties, select @rq if doing would give its last
-			 * queued task a bigger IPC boost when migrated to
-			 * dst_cpu.
-			 */
-			} else if (busiest_nr == nr_running) {
-				long delta = ipcc_score_delta(rq, env);
-
-				if (busiest_ipcc_delta < delta) {
-					//trace_printk("ipcc_find_src_rq: cpu%d->cpu%d delta=%ld > prev_best=%ld, new busiest\n",
-					//	     cpu_of(rq), env->dst_cpu, delta, busiest_ipcc_delta);
-					busiest_ipcc_delta = delta;
-					busiest = rq;
-				}
 			}
 			break;
 
