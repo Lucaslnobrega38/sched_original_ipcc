@@ -892,6 +892,16 @@ struct task_struct {
 	 */
 	ktime_t			ipcc_shadow_died_at;
 	/*
+	 * Set by ipcc_shadow_confirmed() the first time this shadow's own
+	 * tick produces a valid, unfiltered reading - see
+	 * intel_classify_ipcc_final()'s call site in intel_update_ipcc()
+	 * (sched_ipcc.c). Lets ipcc_classify_dwell() end the moment a shadow
+	 * has *any* class, instead of always spending the full
+	 * IPCC_SHADOW_DWELL_MS budget on a compute-bound target that never
+	 * syscalls.
+	 */
+	ktime_t			ipcc_shadow_confirmed_at;
+	/*
 	 * The instant this task's classifier "lag" is measured from: its
 	 * fork time initially, then re-stamped to now() every time it
 	 * actually consumes a turn (ipcc_shadow_fork_work(), fork completed -
@@ -2426,6 +2436,14 @@ void ipcc_classify_tick(struct task_struct *curr, int cpu);
 
 /* Diagnostic-only accessor, see intel_update_ipcc() in sched_ipcc.c. */
 int ipcc_get_classifier_cpu(void);
+
+/*
+ * arch/x86/kernel/sched_ipcc_classifier.c: called from intel_update_ipcc()
+ * once a shadow's own tick has produced a valid class. Stamps
+ * ipcc_shadow_confirmed_at (first call only) and wakes whoever is in
+ * ipcc_classify_dwell() waiting on it.
+ */
+void ipcc_shadow_confirmed(struct task_struct *p);
 #endif
 
 #ifdef CONFIG_MEM_ALLOC_PROFILING

@@ -128,8 +128,21 @@ static inline bool ipcc_cpu_is_atom(int cpu)
  * Same floor serves both because both are "insufficiently rested" by the
  * same measure; splitting them would need two independent thresholds for no
  * real gain.
+ *
+ * Lowered to match one tick (1ms @ HZ=1000, the fastest this can possibly be
+ * re-checked anyway) after re-measuring the failure mode above under the
+ * current ktime-lag scheme rather than the old turn-counter one it was
+ * originally observed on. Four processes spamming a fast syscall in a tight
+ * loop, alongside one real CPU-bound target, still took ~93% of all turns -
+ * but the target's own share (~7%) was still ~100 turns/s, converging its
+ * weight vector to fully saturated in under 150ms and staying there. Being
+ * outvoted for slots no longer means being starved of turns: with no per-slot
+ * queue depth beyond one pending request, the daemons cannot accumulate a
+ * backlog that blocks the target, only win the immediate race for a slot
+ * that just freed. Aggregate throughput also rose roughly 4-5x over the
+ * 200ms floor under comparable contention.
  */
-#define IPCC_MIN_LAG_MS			200
+#define IPCC_MIN_LAG_MS			1
 
 static int ipcc_classifier_cpu = -1;
 static struct task_struct *ipcc_reaper;
@@ -343,6 +356,28 @@ void __noreturn ipcc_shadow_syscall_denied(void)
 	wake_up(&ipcc_dwell_wait);
 
 	do_exit(SIGKILL);
+}
+
+/*
+ * Called from intel_update_ipcc() (sched_ipcc.c) the moment a shadow's own
+ * tick produces a valid class - the counterpart to
+ * ipcc_shadow_syscall_denied() above for a shadow that never makes it to a
+ * syscall. Same release/acquire pairing against ipcc_classify_dwell()'s
+ * predicate, same "wake the reaper now instead of sleeping out the budget"
+ * reasoning.
+ *
+ * Guarded so only the first call stamps: intel_update_ipcc() runs on every
+ * subsequent tick too for as long as the shadow keeps existing, and without
+ * this it would keep overwriting the timestamp with a newer one on every
+ * tick until the reaper actually wakes up and reads it.
+ */
+void ipcc_shadow_confirmed(struct task_struct *p)
+{
+	if (READ_ONCE(p->ipcc_shadow_confirmed_at))
+		return;
+
+	smp_store_release(&p->ipcc_shadow_confirmed_at, ktime_get());
+	wake_up(&ipcc_dwell_wait);
 }
 
 /*
@@ -772,7 +807,8 @@ static void ipcc_classify_dwell(struct ipcc_shadow_req *req)
 	 * set sensibly.
 	 */
 	wait_ret = wait_event_interruptible_timeout(ipcc_dwell_wait,
-						    smp_load_acquire(&shadow->ipcc_shadow_died_at),
+						    smp_load_acquire(&shadow->ipcc_shadow_died_at) ||
+						    smp_load_acquire(&shadow->ipcc_shadow_confirmed_at),
 						    msecs_to_jiffies(IPCC_SHADOW_DWELL_MS));
 
 	t_postdwell = ktime_get();
@@ -874,9 +910,9 @@ static void ipcc_classify_dwell(struct ipcc_shadow_req *req)
 	 */
 	{
 		ktime_t died_at = READ_ONCE(shadow->ipcc_shadow_died_at);
-		// long long life_us = died_at ?
-		//	ktime_to_us(ktime_sub(died_at, t_predwell)) : -1;
-		// unsigned short class = shadow->ipcc;
+		long long life_us = died_at ?
+			ktime_to_us(ktime_sub(died_at, t_predwell)) : -1;
+		unsigned short class = shadow->ipcc;
 		/*
 		 * ->ipcc is not bounded by NR_IPC_CLASSES: it is classid + 1
 		 * straight from MSR_IA32_HW_FEEDBACK_CHAR, whose classid field
@@ -891,24 +927,26 @@ static void ipcc_classify_dwell(struct ipcc_shadow_req *req)
 		 * indexing by it, so an out-of-range class simply decays every
 		 * weight instead of boosting one.
 		 */
-		// int w = (applied && class < NR_IPC_CLASSES) ?
-		//	READ_ONCE(target->ipcc_class_weight[class]) : -1;
+		int w = (applied && class < NR_IPC_CLASSES) ?
+			READ_ONCE(target->ipcc_class_weight[class]) : -1;
 
 		if (died_at)
 			outcome = "syscall";
+		else if (READ_ONCE(shadow->ipcc_shadow_confirmed_at))
+			outcome = "confirmed";
 		else if (wait_ret < 0)
 			outcome = "stopped";
 		else
 			outcome = "timeout";
 
-		// trace_printk("ipcc-classifier: %s: target=%d shadow=%d inject_cb=%lldus fork=%lldus wake=%lldus dwell=%lldus life=%lldus ipcc=%u applied=%d k=%u w=%d\n",
-		//	     outcome, target->pid, shadow->pid,
-		//	     ktime_to_us(ktime_sub(req->t_callback, req->t_inject)),
-		//	     ktime_to_us(ktime_sub(req->t_forked, req->t_callback)),
-		//	     ktime_to_us(ktime_sub(t_predwell, t_prepin)),
-		//	     ktime_to_us(ktime_sub(t_postdwell, t_predwell)),
-		//	     life_us, class, applied,
-		//	     shadow->ipcc_confirm_count, w);
+		trace_printk("ipcc-classifier: %s: target=%d shadow=%d inject_cb=%lldus fork=%lldus wake=%lldus dwell=%lldus life=%lldus ipcc=%u applied=%d k=%u w=%d\n",
+			     outcome, target->pid, shadow->pid,
+			     ktime_to_us(ktime_sub(req->t_callback, req->t_inject)),
+			     ktime_to_us(ktime_sub(req->t_forked, req->t_callback)),
+			     ktime_to_us(ktime_sub(t_predwell, t_prepin)),
+			     ktime_to_us(ktime_sub(t_postdwell, t_predwell)),
+			     life_us, class, applied,
+			     shadow->ipcc_confirm_count, w);
 	}
 
 	/*

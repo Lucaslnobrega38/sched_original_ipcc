@@ -1104,6 +1104,7 @@ static bool update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 static int select_idle_sibling(struct task_struct *p, int prev_cpu, int cpu);
 static unsigned long task_h_load(struct task_struct *p);
+static unsigned long task_h_load_ipcc(struct task_struct *p);
 static unsigned long capacity_of(int cpu);
 
 /* Give new sched_entity start runnable values to heavy its load in infant time */
@@ -5252,7 +5253,7 @@ static struct timer_list ipcc_load_timer =
 
 static void ipcc_refresh_system_load(struct timer_list *t)
 {
-	unsigned long max_cap = 0, free = 0, total = 0;
+	unsigned long top_score = 0, free = 0, total = 0;
 	unsigned long free_permille, tier;
 	int cpu;
 
@@ -5260,25 +5261,19 @@ static void ipcc_refresh_system_load(struct timer_list *t)
 	if (READ_ONCE(ipcc_best_pcore_cpu) < 0)
 		ipcc_latch_best_pcore();
 
-	for_each_online_cpu(cpu)
-		max_cap = max(max_cap, capacity_of(cpu));
+	for_each_cpu_and(cpu, cpu_online_mask, housekeeping_cpumask(HK_TYPE_DOMAIN))
+		top_score = max(top_score, ipcc_cpu_peak_score(cpu));
 
-	if (!max_cap)
+	if (!top_score)
 		goto out;
 
-	/*
-	 * All P-cores share the same (highest) capacity_of() on this
-	 * hardware - see ipcc_best_pcore_cpu's comment for why that signal
-	 * cannot pick *a* favored core, but it is exactly the right signal
-	 * to pick the *set* of P-cores, which is all this needs here.
-	 */
-	for_each_online_cpu(cpu) {
-		unsigned long cap = capacity_of(cpu);
-		unsigned long util;
+	for_each_cpu_and(cpu, cpu_online_mask, housekeeping_cpumask(HK_TYPE_DOMAIN)) {
+		unsigned long cap, util;
 
-		if (cap != max_cap)
+		if (ipcc_cpu_peak_score(cpu) < top_score)
 			continue;
 
+		cap = capacity_of(cpu);
 		util = min(cap, cpu_util(cpu, NULL, -1, 0));
 		total += cap;
 		free += cap - util;
@@ -5336,8 +5331,7 @@ late_initcall(ipcc_start_system_load_timer);
 static inline unsigned long ipcc_misfit_weight(struct task_struct *p, int cpu,
 						unsigned long util)
 {
-	unsigned long score_cur, score_best, ratio_permille, f_permille;
-	unsigned int k;
+	unsigned long score_cur, score_best, ratio_permille;
 	int best;
 
 	/*
@@ -5360,12 +5354,7 @@ static inline unsigned long ipcc_misfit_weight(struct task_struct *p, int cpu,
 
 	ratio_permille = score_best * 1000 / score_cur;
 
-	f_permille = 1000;
-	k = READ_ONCE(ipcc_system_load);
-	while (k-- > 0)
-		f_permille = (f_permille * ratio_permille) / 1000;
-
-	return util * f_permille / 1000;
+	return util * ratio_permille / 1000;
 }
 #endif /* CONFIG_IPC_CLASSES */
 
@@ -5394,23 +5383,44 @@ static inline void update_misfit_status(struct task_struct *p, struct rq *rq)
 	if (!sched_asym_cpucap_active())
 		return;
 
+	if (!p) {
+		rq->misfit_task_load = 0;
+		return;
+	}
+
 	/*
 	 * Affinity allows us to go somewhere higher?  Or are we on biggest
 	 * available CPU already? Or do we fit into this CPU ?
 	 */
-	if (!p || (p->nr_cpus_allowed == 1) ||
-	    (arch_scale_cpu_capacity(cpu) == p->max_allowed_capacity) ||
-	    task_fits_cpu(p, cpu)) {
+	{
+		bool fits = task_fits_cpu(p, cpu);
 
-		rq->misfit_task_load = 0;
-		return;
+		if (sched_ipcc_enabled() && rq->curr == p) {
+			int best = READ_ONCE(ipcc_best_pcore_cpu);
+
+			trace_printk("ipcc-misfit: pid=%d cpu=%d best=%d nr_allowed=%d fits=%d hload=%lu score_cur=%lu score_best=%lu tier=%lu\n",
+				     p->pid, cpu, best, p->nr_cpus_allowed, fits,
+				     task_h_load_ipcc(p),
+				     ipcc_weighted_score(p, cpu),
+				     best >= 0 ? ipcc_weighted_score(p, best) : 0UL,
+				     READ_ONCE(ipcc_system_load));
+		}
+
+		if ((p->nr_cpus_allowed == 1) ||
+		    (!sched_ipcc_enabled() &&
+		     arch_scale_cpu_capacity(cpu) == p->max_allowed_capacity) ||
+		    fits) {
+
+			rq->misfit_task_load = 0;
+			return;
+		}
 	}
 
 	/*
 	 * Make sure that misfit_task_load will not be null even if
 	 * task_h_load() returns 0.
 	 */
-	rq->misfit_task_load = max_t(unsigned long, task_h_load(p), 1);
+	rq->misfit_task_load = max_t(unsigned long, task_h_load_ipcc(p), 1);
 }
 
 void __setparam_fair(struct task_struct *p, const struct sched_attr *attr)
@@ -7577,6 +7587,11 @@ static unsigned long cpu_load(struct rq *rq)
 
 static void update_cfs_rq_h_load(struct cfs_rq *cfs_rq);
 
+static unsigned long cpu_load_ipcc(struct rq *rq)
+{
+	return READ_ONCE(rq->cfs.avg.load_avg_ipcc);
+}
+
 static unsigned long task_h_load_ipcc(struct task_struct *p)
 {
 	struct cfs_rq *cfs_rq = task_cfs_rq(p);
@@ -7610,6 +7625,11 @@ static unsigned long cpu_load_without_ipcc(struct rq *rq, struct task_struct *p)
 	return load;
 }
 #else /* !CONFIG_IPC_CLASSES */
+static inline unsigned long cpu_load_ipcc(struct rq *rq)
+{
+	return cpu_load(rq);
+}
+
 static inline unsigned long task_h_load_ipcc(struct task_struct *p)
 {
 	return task_h_load(p);
@@ -7780,10 +7800,10 @@ wake_affine_weight(struct sched_domain *sd, struct task_struct *p,
 	s64 this_eff_load, prev_eff_load;
 	unsigned long task_load;
 
-	this_eff_load = cpu_load(cpu_rq(this_cpu));
+	this_eff_load = cpu_load_ipcc(cpu_rq(this_cpu));
 
 	if (sync) {
-		unsigned long current_load = task_h_load(current);
+		unsigned long current_load = task_h_load_ipcc(current);
 
 		if (current_load > this_eff_load)
 			return this_cpu;
@@ -7791,14 +7811,14 @@ wake_affine_weight(struct sched_domain *sd, struct task_struct *p,
 		this_eff_load -= current_load;
 	}
 
-	task_load = task_h_load(p);
+	task_load = task_h_load_ipcc(p);
 
 	this_eff_load += task_load;
 	if (sched_feat(WA_BIAS))
 		this_eff_load *= 100;
 	this_eff_load *= capacity_of(prev_cpu);
 
-	prev_eff_load = cpu_load(cpu_rq(prev_cpu));
+	prev_eff_load = cpu_load_ipcc(cpu_rq(prev_cpu));
 	prev_eff_load -= task_load;
 	if (sched_feat(WA_BIAS))
 		prev_eff_load *= 100 + (sd->imbalance_pct - 100) / 2;
@@ -7889,7 +7909,7 @@ sched_balance_find_dst_group_cpu(struct sched_group *group, struct task_struct *
 			}
 		} else if (shallowest_idle_cpu == -1) {
 			
-			load = cpu_load(cpu_rq(i)); 
+			load = cpu_load_ipcc(cpu_rq(i));
 			if (load < min_load) {
 				min_load = load;
 				least_loaded_cpu = i;
@@ -8509,6 +8529,72 @@ static unsigned long cpu_util_without(int cpu, struct task_struct *p)
 
 	return cpu_util(cpu, p, -1, 0);
 }
+
+#ifdef CONFIG_IPC_CLASSES
+static unsigned long cpu_util_ipcc(int cpu)
+{
+	struct rq *rq = cpu_rq(cpu);
+	struct task_struct *curr = rq->curr;
+	unsigned long util = cpu_util_cfs(cpu);
+
+	if (!sched_ipcc_enabled() || !curr || is_idle_task(curr))
+		return util;
+
+	return apply_ipcc_weight(curr, cpu, util);
+}
+
+static unsigned long cpu_util_without_ipcc(int cpu, struct task_struct *p)
+{
+	struct rq *rq = cpu_rq(cpu);
+	unsigned long util = cpu_util_without(cpu, p);
+
+	if (!sched_ipcc_enabled() || !rq->curr || rq->curr == p || is_idle_task(rq->curr))
+		return util;
+
+	return apply_ipcc_weight(rq->curr, cpu, util);
+}
+
+static unsigned long cpu_runnable_ipcc(struct rq *rq)
+{
+	struct task_struct *curr = rq->curr;
+	unsigned long runnable = cpu_runnable(rq);
+
+	if (!sched_ipcc_enabled() || !curr || is_idle_task(curr))
+		return runnable;
+
+	return apply_ipcc_weight(curr, cpu_of(rq), runnable);
+}
+
+static unsigned long cpu_runnable_without_ipcc(struct rq *rq, struct task_struct *p)
+{
+	unsigned long runnable = cpu_runnable_without(rq, p);
+
+	if (!sched_ipcc_enabled() || !rq->curr || rq->curr == p || is_idle_task(rq->curr))
+		return runnable;
+
+	return apply_ipcc_weight(rq->curr, cpu_of(rq), runnable);
+}
+#else /* !CONFIG_IPC_CLASSES */
+static inline unsigned long cpu_util_ipcc(int cpu)
+{
+	return cpu_util_cfs(cpu);
+}
+
+static inline unsigned long cpu_util_without_ipcc(int cpu, struct task_struct *p)
+{
+	return cpu_util_without(cpu, p);
+}
+
+static inline unsigned long cpu_runnable_ipcc(struct rq *rq)
+{
+	return cpu_runnable(rq);
+}
+
+static inline unsigned long cpu_runnable_without_ipcc(struct rq *rq, struct task_struct *p)
+{
+	return cpu_runnable_without(rq, p);
+}
+#endif /* CONFIG_IPC_CLASSES */
 
 /*
  * This function computes an effective utilization for the given CPU, to be
@@ -11164,8 +11250,8 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 #endif
 
 		sgs->group_load += load;
-		sgs->group_util += cpu_util_cfs(i);
-		sgs->group_runnable += cpu_runnable(rq);
+		sgs->group_util += cpu_util_ipcc(i);
+		sgs->group_runnable += cpu_runnable_ipcc(rq);
 		sgs->sum_h_nr_running += rq->cfs.h_nr_runnable;
 
 		nr_running = rq->nr_running;
@@ -11494,8 +11580,8 @@ static inline void update_sg_wakeup_stats(struct sched_domain *sd,
 		else
 			sgs->group_load += cpu_load_without(rq, p);
 
-		sgs->group_util += cpu_util_without(i, p);
-		sgs->group_runnable += cpu_runnable_without(rq, p);
+		sgs->group_util += cpu_util_without_ipcc(i, p);
+		sgs->group_runnable += cpu_runnable_without_ipcc(rq, p);
 		local = task_running_on_cpu(i, p);
 		sgs->sum_h_nr_running += rq->cfs.h_nr_runnable - local;
 

@@ -170,6 +170,24 @@ void intel_update_ipcc(struct task_struct *curr)
 		return;
 	}
 
+#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
+	/*
+	 * A shadow's own tick bypasses the debouncer entirely: it gets exactly
+	 * one unfiltered reading, and that reading - not two consecutive
+	 * matching ones - is the whole sample. See intel_classify_ipcc_final()'s
+	 * doc comment for why a debounced multi-tick reading would not mean
+	 * anything more here anyway, and ipcc_shadow_confirmed() for why this
+	 * lets ipcc_classify_dwell() stop watching immediately instead of
+	 * always spending the full IPCC_SHADOW_DWELL_MS budget.
+	 */
+	if (test_task_syscall_work(curr, IPCC_SHADOW)) {
+		intel_classify_ipcc_final(curr);
+		if (curr->ipcc)
+			ipcc_shadow_confirmed(curr);
+		return;
+	}
+#endif
+
 	if (intel_hfi_read_classid(&hfi_class))
 		return;
 
