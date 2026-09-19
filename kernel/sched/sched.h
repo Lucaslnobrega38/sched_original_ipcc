@@ -713,6 +713,7 @@ struct cfs_rq {
 		unsigned long	load_avg;
 		unsigned long	util_avg;
 		unsigned long	runnable_avg;
+		unsigned long load_avg_ipcc;
 	} removed;
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -1171,7 +1172,6 @@ struct rq {
 #endif
 
 #ifdef CONFIG_IPC_CLASSES
-#define NR_IPC_CLASSES	5  /* ipcc 0 (unclassified) + classids 0-3 → ipcc 1-4 */
 	unsigned char		nr_ipcc[NR_IPC_CLASSES];
 #endif
 
@@ -2065,6 +2065,12 @@ init_numa_balancing(u64 clone_flags, struct task_struct *p)
 
 #endif /* !CONFIG_NUMA_BALANCING */
 
+#if defined(CONFIG_IPC_CLASSES) && !defined(CONFIG_NUMA_BALANCING)
+extern int migrate_task_to(struct task_struct *p, int cpu);
+extern int migrate_swap(struct task_struct *p, struct task_struct *t,
+			int cpu, int scpu);
+#endif
+
 static inline void
 queue_balance_callback(struct rq *rq,
 		       struct balance_callback *head,
@@ -2163,7 +2169,7 @@ extern struct static_key_false sched_cluster_active;
 
 static __always_inline bool sched_asym_cpucap_active(void)
 {
-	return static_branch_unlikely(&sched_asym_cpucapacity);  // o caminho favorecido é o de cpus homogeneas
+	return static_branch_unlikely(&sched_asym_cpucapacity);  
 }
 
 struct sched_group_capacity {
@@ -3078,6 +3084,11 @@ static inline bool sched_ipcc_enabled(void)
 	return static_branch_unlikely(&sched_ipcc);
 }
 
+/* arch/x86/kernel/sched_ipcc.c - true cpu-type check, not a score heuristic. */
+bool ipcc_cpu_is_ecore(int cpu);
+/* arch/x86/kernel/sched_ipcc.c - raw topology fact, unaffected by nosmt policy. */
+int ipcc_max_smt_threads(void);
+
 #ifndef arch_update_ipcc
 /**
  * arch_update_ipcc() - Update the IPC class of the current task
@@ -3127,15 +3138,52 @@ unsigned long arch_get_ipcc_score(unsigned short ipcc, int cpu)
 	return SCHED_IPCC_SCORE_SCALE;
 }
 #endif
+
+#ifndef arch_get_ipcc_baseline
+static inline int arch_get_ipcc_baseline(int cpu) { return 1; }
+#endif
+
+/*
+ * Expected IPC score of @p on @cpu, weighted by its recent class-mix
+ * history (@p->ipcc_class_weight) rather than just its single
+ * currently-confirmed class. See context.md.
+ */
+static inline unsigned long ipcc_weighted_score(struct task_struct *p, int cpu)
+{
+	unsigned long sum = 0, total = 0;
+	int i, score;
+
+	for (i = 1; i < NR_IPC_CLASSES; i++) {
+		unsigned short w;
+
+		score = arch_get_ipcc_score(i, cpu);
+		if (score <= 0)
+			continue;
+		/* @p is often on a remote rq; lockless, matches the
+		 * WRITE_ONCE side in update_ipcc_class_weights().
+		 */
+		w = READ_ONCE(p->ipcc_class_weight[i]);
+		sum   += (unsigned long)w * score;
+		total += w;
+	}
+
+	return total ? sum / total : arch_get_ipcc_baseline(cpu);
+}
+
 #else /* CONFIG_IPC_CLASSES */
 
 #define arch_get_ipcc_score(ipcc, cpu) (-EINVAL)
 #define arch_update_ipcc(curr)
+#define arch_get_ipcc_baseline(cpu) (1)
 
 static inline bool sched_ipcc_enabled(void) { return false; }
 
-#endif /* CONFIG_IPC_CLASSES */
+static inline unsigned long ipcc_weighted_score(struct task_struct *p, int cpu)
+{
+	return 1;
+}
 
+#endif /* CONFIG_IPC_CLASSES */
 
 #ifndef arch_scale_freq_capacity
 /**

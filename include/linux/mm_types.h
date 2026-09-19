@@ -1371,6 +1371,24 @@ struct mm_struct {
 #ifdef CONFIG_MM_ID
 		mm_id_t mm_id;
 #endif /* CONFIG_MM_ID */
+#ifdef CONFIG_IPC_CLASSES_SHADOW_DEFER_COW
+		/* Linkage between a shadow clone's mm and its target's - see
+		 * context.md. A given mm only ever populates one direction:
+		 * ipcc_shadows(+lock) on a target's mm, ipcc_shadow_of(+node)
+		 * on a shadow's (a shadow can never itself gain shadows).
+		 */
+		struct list_head ipcc_shadows;
+		spinlock_t ipcc_shadows_lock;
+		struct list_head ipcc_shadow_node;
+		struct mm_struct *ipcc_shadow_of;
+		/* Stash list for a shadow's mm (struct ipcc_stash_entry):
+		 * address -> pre-write folio. Populated by the target
+		 * (ipcc_stash_offer()), consumed by the shadow
+		 * (ipcc_stash_take()), protected by the target's
+		 * ipcc_shadows_lock. See context.md.
+		 */
+		struct list_head ipcc_stash;
+#endif /* CONFIG_IPC_CLASSES_SHADOW_DEFER_COW */
 	} __randomize_layout;
 
 	/*

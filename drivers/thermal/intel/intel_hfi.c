@@ -38,10 +38,13 @@
 #include <linux/suspend.h>
 #include <linux/string.h>
 #include <linux/syscore_ops.h>
+#include <linux/trace.h>
 #include <linux/topology.h>
 #include <linux/workqueue.h>
 
+#include <asm/intel-family.h>
 #include <asm/msr.h>
+#include <asm/processor.h>
 #include <linux/sched/topology.h>
 
 #include "intel_hfi.h"
@@ -200,6 +203,8 @@ static int __percpu *hfi_ipcc_scores;
 
 /* Sequence counter for hfi_ipcc_scores */
 static seqcount_t hfi_ipcc_seqcount = SEQCNT_ZERO(hfi_ipcc_seqcount);
+static int __percpu *hfi_ipcc_baseline;
+static bool hfi_ipcc_baseline_set;
 
 static int alloc_hfi_ipcc_scores(void)
 {
@@ -209,8 +214,33 @@ static int alloc_hfi_ipcc_scores(void)
 	hfi_ipcc_scores = __alloc_percpu(sizeof(*hfi_ipcc_scores) *
 					 hfi_features.nr_classes,
 					 sizeof(*hfi_ipcc_scores));
+	if (!hfi_ipcc_scores)
+		return -ENOMEM;
 
-	return hfi_ipcc_scores ? 0 : -ENOMEM;
+	hfi_ipcc_baseline = alloc_percpu(int);
+	if (!hfi_ipcc_baseline) {
+		free_percpu(hfi_ipcc_scores);
+		hfi_ipcc_scores = NULL;
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+int intel_hfi_get_ipcc_baseline(int cpu)
+{
+	int baseline;
+	unsigned int seq;
+
+	if (!hfi_ipcc_baseline || cpu < 0 || cpu >= nr_cpu_ids)
+		return 1;
+
+	do {
+		seq = read_seqcount_begin(&hfi_ipcc_seqcount);
+		baseline = *per_cpu_ptr(hfi_ipcc_baseline, cpu);
+	} while (read_seqcount_retry(&hfi_ipcc_seqcount, seq));
+
+	return baseline ? baseline : 1;
 }
 
 unsigned long intel_hfi_get_ipcc_score(unsigned short ipcc, int cpu)
@@ -226,14 +256,17 @@ unsigned long intel_hfi_get_ipcc_score(unsigned short ipcc, int cpu)
 		return -EINVAL;
 
 	if (ipcc == 0)
-		ipcc = HFI_UNCLASSIFIED_DEFAULT; // nao concordo
+		ipcc = HFI_UNCLASSIFIED_DEFAULT; 
 
 	/*
 	 * Scheduler IPC classes start at 1. HFI classes start at 0.
 	 * See note intel_hfi_update_ipcc().
 	 */
-	if (ipcc >= hfi_features.nr_classes + 1)
+	if (ipcc >= hfi_features.nr_classes + 1) {
+		//trace_printk("IPCC SCORE: cpu=%d ipcc=%d nr_classes=%d OUT-OF-RANGE ret=-EINVAL\n",
+		//	     cpu, ipcc, hfi_features.nr_classes);
 		return -EINVAL;
+	}
 
 	/*
 	 * The seqcount implies load-acquire semantics to order loads with
@@ -243,8 +276,11 @@ unsigned long intel_hfi_get_ipcc_score(unsigned short ipcc, int cpu)
 	do {
 		seq = read_seqcount_begin(&hfi_ipcc_seqcount);
 		/* @ipcc is never 0. */
-		score = scores[ipcc - 1]; // verificar isso depois 
+		score = scores[ipcc - 1];
 	} while (read_seqcount_retry(&hfi_ipcc_seqcount, seq));
+
+	//trace_printk("IPCC SCORE: cpu=%d ipcc=%d nr_classes=%d score=%d\n",
+	//	     cpu, ipcc, hfi_features.nr_classes, score);
 
 	return score;
 }
@@ -268,6 +304,7 @@ static void set_hfi_ipcc_scores(struct hfi_instance *hfi_instance)
 	 */
 	write_seqcount_begin(&hfi_ipcc_seqcount);
 	for_each_cpu(cpu, hfi_instance->cpus) {
+		unsigned int sum = 0;
 		int c, *scores;
 		s16 index;
 
@@ -281,9 +318,20 @@ static void set_hfi_ipcc_scores(struct hfi_instance *hfi_instance)
 			       index * hfi_features.cpu_stride +
 			       c * hfi_features.class_stride;
 			scores[c] = caps->perf_cap;
-			//pr_info("IPCC SCORE: classe %d recebe %d",c,scores[c]);
+			sum += caps->perf_cap;
+
+			pr_info("IPCC SCORE: cpu=%d classe=%d perf_cap=%u ee_cap=%u score=%d\n",
+				cpu, c, caps->perf_cap, caps->ee_cap, scores[c]);
 		}
+
+		*per_cpu_ptr(hfi_ipcc_baseline, cpu) = sum / hfi_features.nr_classes;
+
+		if (!hfi_ipcc_baseline_set)
+			pr_info("IPCC BASELINE: cpu=%d %d\n",
+				cpu, *per_cpu_ptr(hfi_ipcc_baseline, cpu));
 	}
+
+	hfi_ipcc_baseline_set = true;
 
 	write_seqcount_end(&hfi_ipcc_seqcount);
 	raw_spin_unlock_irq(&hfi_instance->table_lock);

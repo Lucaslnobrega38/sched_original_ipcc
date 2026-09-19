@@ -22,6 +22,7 @@
 #include <linux/sched/task.h>
 #include <linux/sched/task_stack.h>
 #include <linux/sched/cputime.h>
+#include <linux/sched/coredump.h>
 #include <linux/sched/ext.h>
 #include <linux/seq_file.h>
 #include <linux/rtmutex.h>
@@ -69,6 +70,7 @@
 #include <linux/proc_fs.h>
 #include <linux/profile.h>
 #include <linux/rmap.h>
+#include <linux/ipcc_stash.h>
 #include <linux/ksm.h>
 #include <linux/acct.h>
 #include <linux/userfaultfd_k.h>
@@ -1089,6 +1091,7 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p,
 	mm_init_aio(mm);
 	mm_init_owner(mm, p);
 	mm_pasid_init(mm);
+	ipcc_stash_mm_init(mm);
 	RCU_INIT_POINTER(mm->exe_file, NULL);
 	mmu_notifier_subscriptions_init(mm);
 	init_tlb_flush_pending(mm);
@@ -2544,6 +2547,774 @@ fork_out:
 	spin_unlock_irq(&current->sighand->siglock);
 	return ERR_PTR(retval);
 }
+
+#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
+/*
+ * shadow_copy_process() (below) is a copy_process() variant for IPC-class
+ * shadow clones - structurally identical to copy_process(), diverging only
+ * in parent (reaper, not current) and SYSCALL_WORK_IPCC_SHADOW (kills the
+ * clone on its first syscall). See context.md for the full design.
+ */
+
+/*
+ * Turn every writable VM_SHARED VMA in a freshly-forked shadow's mm into a
+ * private, COW-eligible one. Without this the shadow's ptes for such a VMA
+ * stay writable and point at the target's real physical pages (is_cow_mapping()
+ * excludes VM_SHARED) - see context.md ("Problema A") for the corruption this
+ * caused and how it was found. VM_HUGETLB is excluded (not checked against
+ * hugetlb's own COW locking). Called before the shadow is woken, so its mm is
+ * not visible to anyone else yet and mmap_write_lock() here is uncontended.
+ */
+static void shadow_defang_shared_mappings(struct mm_struct *mm)
+{
+	VMA_ITERATOR(vmi, mm, 0);
+	struct vm_area_struct *vma;
+
+	mmap_write_lock(mm);
+	for_each_vma(vmi, vma) {
+		if ((vma->vm_flags & (VM_SHARED | VM_MAYWRITE | VM_HUGETLB)) !=
+		    (VM_SHARED | VM_MAYWRITE))
+			continue;
+
+		/* Must write-protect while VM_SHARED is still set - see
+		 * wp_clean_test_walk() (mapping_dirty_helpers.c).
+		 */
+		wp_shared_mapping_vma(vma, vma->vm_start, vma->vm_end);
+
+		/* Read-only alone still lets the shadow read the target's live
+		 * mutations. Stash markers trap reads too - see context.md.
+		 */
+		if (ipcc_stash_active())
+			ipcc_stash_arm_vma(vma);
+
+		/* Balances dup_mmap()'s mapping_allow_writable() for this vma,
+		 * which __remove_shared_vm_struct() would otherwise fail to
+		 * undo once VM_SHARED is cleared below - see context.md.
+		 */
+		if (vma->vm_file)
+			mapping_unmap_writable(vma->vm_file->f_mapping);
+
+		/* VM_MAYSHARE must come down with VM_SHARED, not after -
+		 * do_wp_page() treats the pair as interchangeable, and mmap()
+		 * never sets one without the other. See context.md for the
+		 * large-folio corruption this fixes.
+		 */
+		vm_flags_clear(vma, VM_SHARED | VM_MAYSHARE);
+	}
+	mmap_write_unlock(mm);
+}
+
+/*
+ * The other half of the above: make the target's own writable-shared pages
+ * trap on their next write, so the stash can capture the pre-write contents.
+ * Runs on current->mm, read lock only (permissions only, no VMA structure
+ * change), not nested under shadow_defang_shared_mappings()'s write lock on
+ * the shadow's mm. Safe against concurrent writers because
+ * ipcc_classify_eligible() only admits single-threaded targets.
+ */
+static void shadow_protect_target_shared(struct mm_struct *mm)
+{
+	VMA_ITERATOR(vmi, mm, 0);
+	struct vm_area_struct *vma;
+
+	mmap_read_lock(mm);
+	for_each_vma(vmi, vma) {
+		if ((vma->vm_flags & (VM_SHARED | VM_MAYWRITE | VM_HUGETLB)) !=
+		    (VM_SHARED | VM_MAYWRITE))
+			continue;
+
+		wp_shared_mapping_vma(vma, vma->vm_start, vma->vm_end);
+	}
+	mmap_read_unlock(mm);
+}
+
+static __latent_entropy struct task_struct *shadow_copy_process(
+					struct task_struct *reaper,
+					struct pid *pid,
+					int trace,
+					int node,
+					struct kernel_clone_args *args)
+{
+	int pidfd = -1, retval;
+	struct task_struct *p;
+	struct multiprocess_signals delayed;
+	struct file *pidfile = NULL;
+	const u64 clone_flags = args->flags;
+	struct nsproxy *nsp = current->nsproxy;
+
+	/*
+	 * Don't allow sharing the root directory with processes in a different
+	 * namespace
+	 */
+	if ((clone_flags & (CLONE_NEWNS|CLONE_FS)) == (CLONE_NEWNS|CLONE_FS))
+		return ERR_PTR(-EINVAL);
+
+	if ((clone_flags & (CLONE_NEWUSER|CLONE_FS)) == (CLONE_NEWUSER|CLONE_FS))
+		return ERR_PTR(-EINVAL);
+
+	/*
+	 * Thread groups must share signals as well, and detached threads
+	 * can only be started up within the thread group.
+	 */
+	if ((clone_flags & CLONE_THREAD) && !(clone_flags & CLONE_SIGHAND))
+		return ERR_PTR(-EINVAL);
+
+	/*
+	 * Shared signal handlers imply shared VM. By way of the above,
+	 * thread groups also imply shared VM. Blocking this case allows
+	 * for various simplifications in other code.
+	 */
+	if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
+		return ERR_PTR(-EINVAL);
+
+	/*
+	 * Siblings of global init remain as zombies on exit since they are
+	 * not reaped by their parent (swapper). To solve this and to avoid
+	 * multi-rooted process trees, prevent global and container-inits
+	 * from creating siblings.
+	 */
+	if ((clone_flags & CLONE_PARENT) &&
+				current->signal->flags & SIGNAL_UNKILLABLE)
+		return ERR_PTR(-EINVAL);
+
+	/*
+	 * If the new process will be in a different pid or user namespace
+	 * do not allow it to share a thread group with the forking task.
+	 */
+	if (clone_flags & CLONE_THREAD) {
+		if ((clone_flags & (CLONE_NEWUSER | CLONE_NEWPID)) ||
+		    (task_active_pid_ns(current) != nsp->pid_ns_for_children))
+			return ERR_PTR(-EINVAL);
+	}
+
+	if (clone_flags & CLONE_PIDFD) {
+		/*
+		 * - CLONE_DETACHED is blocked so that we can potentially
+		 *   reuse it later for CLONE_PIDFD.
+		 */
+		if (clone_flags & CLONE_DETACHED)
+			return ERR_PTR(-EINVAL);
+	}
+
+	/*
+	 * Force any signals received before this point to be delivered
+	 * before the fork happens.  Collect up signals sent to multiple
+	 * processes that happen during the fork and delay them so that
+	 * they appear to happen after the fork.
+	 */
+	sigemptyset(&delayed.signal);
+	INIT_HLIST_NODE(&delayed.node);
+
+	spin_lock_irq(&current->sighand->siglock);
+	if (!(clone_flags & CLONE_THREAD))
+		hlist_add_head(&delayed.node, &current->signal->multiprocess);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
+	retval = -ERESTARTNOINTR;
+	if (task_sigpending(current))
+		goto fork_out;
+
+	retval = -ENOMEM;
+	p = dup_task_struct(current, node);
+	if (!p)
+		goto fork_out;
+	p->flags &= ~PF_KTHREAD;
+	if (args->kthread)
+		p->flags |= PF_KTHREAD;
+	if (args->user_worker) {
+		/*
+		 * Mark us a user worker, and block any signal that isn't
+		 * fatal or STOP
+		 */
+		p->flags |= PF_USER_WORKER;
+		siginitsetinv(&p->blocked, sigmask(SIGKILL)|sigmask(SIGSTOP));
+	}
+	if (args->io_thread)
+		p->flags |= PF_IO_WORKER;
+
+	if (args->name)
+		strscpy_pad(p->comm, args->name, sizeof(p->comm));
+
+	p->set_child_tid = (clone_flags & CLONE_CHILD_SETTID) ? args->child_tid : NULL;
+	/*
+	 * TID is cleared in mm_release() when the task exits
+	 */
+	p->clear_child_tid = (clone_flags & CLONE_CHILD_CLEARTID) ? args->child_tid : NULL;
+
+	ftrace_graph_init_task(p);
+
+	rt_mutex_init_task(p);
+
+	lockdep_assert_irqs_enabled();
+#ifdef CONFIG_PROVE_LOCKING
+	DEBUG_LOCKS_WARN_ON(!p->softirqs_enabled);
+#endif
+	retval = copy_creds(p, clone_flags);
+	if (retval < 0)
+		goto bad_fork_free;
+
+	retval = -EAGAIN;
+	if (is_rlimit_overlimit(task_ucounts(p), UCOUNT_RLIMIT_NPROC, rlimit(RLIMIT_NPROC))) {
+		if (p->real_cred->user != INIT_USER &&
+		    !capable(CAP_SYS_RESOURCE) && !capable(CAP_SYS_ADMIN))
+			goto bad_fork_cleanup_count;
+	}
+	current->flags &= ~PF_NPROC_EXCEEDED;
+
+	/*
+	 * If multiple threads are within copy_process(), then this check
+	 * triggers too late. This doesn't hurt, the check is only there
+	 * to stop root fork bombs.
+	 */
+	retval = -EAGAIN;
+	if (data_race(nr_threads >= max_threads))
+		goto bad_fork_cleanup_count;
+
+	delayacct_tsk_init(p);	/* Must remain after dup_task_struct() */
+	p->flags &= ~(PF_SUPERPRIV | PF_WQ_WORKER | PF_IDLE | PF_NO_SETAFFINITY);
+	p->flags |= PF_FORKNOEXEC;
+	INIT_LIST_HEAD(&p->children);
+	INIT_LIST_HEAD(&p->sibling);
+	rcu_copy_process(p);
+	p->vfork_done = NULL;
+	spin_lock_init(&p->alloc_lock);
+
+	init_sigpending(&p->pending);
+
+	p->utime = p->stime = p->gtime = 0;
+#ifdef CONFIG_ARCH_HAS_SCALED_CPUTIME
+	p->utimescaled = p->stimescaled = 0;
+#endif
+	prev_cputime_init(&p->prev_cputime);
+
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
+	seqcount_init(&p->vtime.seqcount);
+	p->vtime.starttime = 0;
+	p->vtime.state = VTIME_INACTIVE;
+#endif
+
+#ifdef CONFIG_IO_URING
+	p->io_uring = NULL;
+	retval = io_uring_fork(p);
+	if (unlikely(retval))
+		goto bad_fork_cleanup_delayacct;
+	retval = -EAGAIN;
+#endif
+
+	p->default_timer_slack_ns = current->timer_slack_ns;
+
+#ifdef CONFIG_PSI
+	p->psi_flags = 0;
+#endif
+
+	task_io_accounting_init(&p->ioac);
+	acct_clear_integrals(p);
+
+	posix_cputimers_init(&p->posix_cputimers);
+	tick_dep_init_task(p);
+
+	p->io_context = NULL;
+	audit_set_context(p, NULL);
+	cgroup_fork(p);
+	if (args->kthread) {
+		if (!set_kthread_struct(p))
+			goto bad_fork_cleanup_delayacct;
+	}
+#ifdef CONFIG_NUMA
+	p->mempolicy = mpol_dup(p->mempolicy);
+	if (IS_ERR(p->mempolicy)) {
+		retval = PTR_ERR(p->mempolicy);
+		p->mempolicy = NULL;
+		goto bad_fork_cleanup_delayacct;
+	}
+#endif
+#ifdef CONFIG_CPUSETS
+	p->cpuset_mem_spread_rotor = NUMA_NO_NODE;
+	seqcount_spinlock_init(&p->mems_allowed_seq, &p->alloc_lock);
+#endif
+#ifdef CONFIG_TRACE_IRQFLAGS
+	memset(&p->irqtrace, 0, sizeof(p->irqtrace));
+	p->irqtrace.hardirq_disable_ip	= _THIS_IP_;
+	p->irqtrace.softirq_enable_ip	= _THIS_IP_;
+	p->softirqs_enabled		= 1;
+	p->softirq_context		= 0;
+#endif
+
+	p->pagefault_disabled = 0;
+
+	lockdep_init_task(p);
+
+	p->blocked_on = NULL; /* not blocked yet */
+
+#ifdef CONFIG_BCACHE
+	p->sequential_io	= 0;
+	p->sequential_io_avg	= 0;
+#endif
+#ifdef CONFIG_BPF_SYSCALL
+	RCU_INIT_POINTER(p->bpf_storage, NULL);
+	p->bpf_ctx = NULL;
+#endif
+
+	unwind_task_init(p);
+
+	/* Perform scheduler related setup. Assign this task to a CPU. */
+	retval = sched_fork(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_policy;
+
+	retval = perf_event_init_task(p, clone_flags);
+	if (retval)
+		goto bad_fork_sched_cancel_fork;
+	retval = audit_alloc(p);
+	if (retval)
+		goto bad_fork_cleanup_perf;
+	/* copy all the process information */
+	shm_init_task(p);
+	retval = security_task_alloc(p, clone_flags);
+	if (retval)
+		goto bad_fork_cleanup_audit;
+	retval = copy_semundo(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_security;
+	retval = copy_files(clone_flags, p, args->no_files);
+	if (retval)
+		goto bad_fork_cleanup_semundo;
+	/* SHADOW FORK DIFFERENCE: no copy_fs() - see context.md. */
+	p->fs = NULL;
+	retval = copy_sighand(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_fs;
+	retval = copy_signal(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_sighand;
+	retval = copy_mm(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_signal;
+	if (p->mm) {
+		/* A shadow is not debuggable - never let it reach a coredump
+		 * attempt. See context.md ("why the claude crash froze the
+		 * machine") for the fs=NULL + CLONE_CLEAR_SIGHAND + d_path()
+		 * chain this closes.
+		 */
+		set_dumpable(p->mm, SUID_DUMP_DISABLE);
+
+		shadow_defang_shared_mappings(p->mm);
+		/* Only worth trapping the target's writes if the stash will
+		 * consume them. current == the target here.
+		 */
+		if (ipcc_stash_active() && current->mm)
+			shadow_protect_target_shared(current->mm);
+	}
+	retval = copy_namespaces(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_mm;
+	retval = copy_io(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_namespaces;
+	retval = copy_thread(p, args);
+	if (retval)
+		goto bad_fork_cleanup_io;
+
+	stackleak_task_init(p);
+
+	if (pid != &init_struct_pid) {
+		pid = alloc_pid(p->nsproxy->pid_ns_for_children, args->set_tid,
+				args->set_tid_size);
+		if (IS_ERR(pid)) {
+			retval = PTR_ERR(pid);
+			goto bad_fork_cleanup_thread;
+		}
+	}
+
+	/*
+	 * This has to happen after we've potentially unshared the file
+	 * descriptor table (so that the pidfd doesn't leak into the child
+	 * if the fd table isn't shared).
+	 */
+	if (clone_flags & CLONE_PIDFD) {
+		int flags = (clone_flags & CLONE_THREAD) ? PIDFD_THREAD : 0;
+
+		/*
+		 * Note that no task has been attached to @pid yet indicate
+		 * that via CLONE_PIDFD.
+		 */
+		retval = pidfd_prepare(pid, flags | PIDFD_STALE, &pidfile);
+		if (retval < 0)
+			goto bad_fork_free_pid;
+		pidfd = retval;
+
+		retval = put_user(pidfd, args->pidfd);
+		if (retval)
+			goto bad_fork_put_pidfd;
+	}
+
+#ifdef CONFIG_BLOCK
+	p->plug = NULL;
+#endif
+	futex_init_task(p);
+
+	/*
+	 * sigaltstack should be cleared when sharing the same VM
+	 */
+	if ((clone_flags & (CLONE_VM|CLONE_VFORK)) == CLONE_VM)
+		sas_ss_reset(p);
+
+	/*
+	 * Syscall tracing and stepping should be turned off in the
+	 * child regardless of CLONE_PTRACE.
+	 */
+	user_disable_single_step(p);
+	clear_task_syscall_work(p, SYSCALL_TRACE);
+#if defined(CONFIG_GENERIC_ENTRY) || defined(TIF_SYSCALL_EMU)
+	clear_task_syscall_work(p, SYSCALL_EMU);
+#endif
+	clear_tsk_latency_tracing(p);
+
+	/* SHADOW FORK DIFFERENCE 1/2: arm the syscall trap - first syscall
+	 * attempt kills the shadow, see syscall_trace_enter().
+	 */
+	set_task_syscall_work(p, IPCC_SHADOW);
+
+	/* ok, now we should be set up.. */
+	p->pid = pid_nr(pid);
+	if (clone_flags & CLONE_THREAD) {
+		p->group_leader = current->group_leader;
+		p->tgid = current->tgid;
+	} else {
+		p->group_leader = p;
+		p->tgid = p->pid;
+	}
+
+	p->nr_dirtied = 0;
+	p->nr_dirtied_pause = 128 >> (PAGE_SHIFT - 10);
+	p->dirty_paused_when = 0;
+
+	p->pdeath_signal = 0;
+	p->task_works = NULL;
+	clear_posix_cputimers_work(p);
+
+#ifdef CONFIG_KRETPROBES
+	p->kretprobe_instances.first = NULL;
+#endif
+#ifdef CONFIG_RETHOOK
+	p->rethooks.first = NULL;
+#endif
+
+	/*
+	 * Ensure that the cgroup subsystem policies allow the new process to be
+	 * forked. It should be noted that the new process's css_set can be changed
+	 * between here and cgroup_post_fork() if an organisation operation is in
+	 * progress.
+	 */
+	retval = cgroup_can_fork(p, args);
+	if (retval)
+		goto bad_fork_put_pidfd;
+
+	/*
+	 * Now that the cgroups are pinned, re-clone the parent cgroup and put
+	 * the new task on the correct runqueue. All this *before* the task
+	 * becomes visible.
+	 *
+	 * This isn't part of ->can_fork() because while the re-cloning is
+	 * cgroup specific, it unconditionally needs to place the task on a
+	 * runqueue.
+	 */
+	retval = sched_cgroup_fork(p, args);
+	if (retval)
+		goto bad_fork_cancel_cgroup;
+
+	/*
+	 * Allocate a default futex hash for the user process once the first
+	 * thread spawns.
+	 */
+	if (need_futex_hash_allocate_default(clone_flags)) {
+		retval = futex_hash_allocate_default();
+		if (retval)
+			goto bad_fork_cancel_cgroup;
+		/*
+		 * If we fail beyond this point we don't free the allocated
+		 * futex hash map. We assume that another thread will be created
+		 * and makes use of it. The hash map will be freed once the main
+		 * thread terminates.
+		 */
+	}
+	/*
+	 * From this point on we must avoid any synchronous user-space
+	 * communication until we take the tasklist-lock. In particular, we do
+	 * not want user-space to be able to predict the process start-time by
+	 * stalling fork(2) after we recorded the start_time but before it is
+	 * visible to the system.
+	 */
+
+	p->start_time = ktime_get_ns();
+	p->start_boottime = ktime_get_boottime_ns();
+
+	/*
+	 * Make it visible to the rest of the system, but dont wake it up yet.
+	 * Need tasklist lock for parent etc handling!
+	 */
+	write_lock_irq(&tasklist_lock);
+
+	/* SHADOW FORK DIFFERENCE 2/2: parent to @reaper, not current - keeps
+	 * the shadow invisible to (and unreapable by) the sampled task.
+	 * @reaper ignores SIGCHLD, so it autoreaps. exit_signal must be
+	 * SIGCHLD (not -1 or 0) for that autoreap path.
+	 */
+	p->real_parent = reaper;
+	p->parent_exec_id = reaper->self_exec_id;
+	p->exit_signal = SIGCHLD;
+
+	klp_copy_process(p);
+
+	sched_core_fork(p);
+
+	spin_lock(&current->sighand->siglock);
+
+	rv_task_fork(p);
+
+	rseq_fork(p, clone_flags);
+
+	/* Don't start children in a dying pid namespace */
+	if (unlikely(!(ns_of_pid(pid)->pid_allocated & PIDNS_ADDING))) {
+		retval = -ENOMEM;
+		goto bad_fork_core_free;
+	}
+
+	/* Let kill terminate clone/fork in the middle */
+	if (fatal_signal_pending(current)) {
+		retval = -EINTR;
+		goto bad_fork_core_free;
+	}
+
+	/* No more failure paths after this point. */
+
+	/*
+	 * Copy seccomp details explicitly here, in case they were changed
+	 * before holding sighand lock.
+	 */
+	copy_seccomp(p);
+
+	init_task_pid_links(p);
+	if (likely(p->pid)) {
+		ptrace_init_task(p, (clone_flags & CLONE_PTRACE) || trace);
+
+		init_task_pid(p, PIDTYPE_PID, pid);
+		if (thread_group_leader(p)) {
+			init_task_pid(p, PIDTYPE_TGID, pid);
+			init_task_pid(p, PIDTYPE_PGID, task_pgrp(current));
+			init_task_pid(p, PIDTYPE_SID, task_session(current));
+
+			if (is_child_reaper(pid)) {
+				ns_of_pid(pid)->child_reaper = p;
+				p->signal->flags |= SIGNAL_UNKILLABLE;
+			}
+			p->signal->shared_pending.signal = delayed.signal;
+			p->signal->tty = tty_kref_get(current->signal->tty);
+			/*
+			 * Inherit has_child_subreaper flag under the same
+			 * tasklist_lock with adding child to the process tree
+			 * for propagate_has_child_subreaper optimization.
+			 */
+			p->signal->has_child_subreaper = p->real_parent->signal->has_child_subreaper ||
+							 p->real_parent->signal->is_child_subreaper;
+			list_add_tail(&p->sibling, &p->real_parent->children);
+			list_add_tail_rcu(&p->tasks, &init_task.tasks);
+			attach_pid(p, PIDTYPE_TGID);
+			attach_pid(p, PIDTYPE_PGID);
+			attach_pid(p, PIDTYPE_SID);
+			__this_cpu_inc(process_counts);
+		} else {
+			current->signal->nr_threads++;
+			current->signal->quick_threads++;
+			atomic_inc(&current->signal->live);
+			refcount_inc(&current->signal->sigcnt);
+			task_join_group_stop(p);
+			list_add_tail_rcu(&p->thread_node,
+					  &p->signal->thread_head);
+		}
+		attach_pid(p, PIDTYPE_PID);
+		nr_threads++;
+	}
+	total_forks++;
+	hlist_del_init(&delayed.node);
+	spin_unlock(&current->sighand->siglock);
+	syscall_tracepoint_update(p);
+	write_unlock_irq(&tasklist_lock);
+
+	if (pidfile)
+		fd_install(pidfd, pidfile);
+
+	proc_fork_connector(p);
+	sched_post_fork(p);
+	cgroup_post_fork(p, args);
+	perf_event_fork(p);
+
+	trace_task_newtask(p, clone_flags);
+	uprobe_copy_process(p, clone_flags);
+	user_events_fork(p, clone_flags);
+
+	copy_oom_score_adj(clone_flags, p);
+
+	return p;
+
+bad_fork_core_free:
+	sched_core_free(p);
+	spin_unlock(&current->sighand->siglock);
+	write_unlock_irq(&tasklist_lock);
+bad_fork_cancel_cgroup:
+	cgroup_cancel_fork(p, args);
+bad_fork_put_pidfd:
+	if (clone_flags & CLONE_PIDFD) {
+		fput(pidfile);
+		put_unused_fd(pidfd);
+	}
+bad_fork_free_pid:
+	if (pid != &init_struct_pid)
+		free_pid(pid);
+bad_fork_cleanup_thread:
+	exit_thread(p);
+bad_fork_cleanup_io:
+	if (p->io_context)
+		exit_io_context(p);
+bad_fork_cleanup_namespaces:
+	exit_nsproxy_namespaces(p);
+bad_fork_cleanup_mm:
+	if (p->mm) {
+		sched_mm_cid_exit(p);
+		mm_clear_owner(p->mm, p);
+		mmput(p->mm);
+	}
+bad_fork_cleanup_signal:
+	if (!(clone_flags & CLONE_THREAD))
+		free_signal_struct(p->signal);
+bad_fork_cleanup_sighand:
+	__cleanup_sighand(p->sighand);
+bad_fork_cleanup_fs:
+	exit_fs(p); /* blocking; ->fs is always NULL here, see above */
+	/*
+	 * No bad_fork_cleanup_files label: nothing can fail between
+	 * copy_files() and here anymore now that copy_fs() is gone, so
+	 * nothing jumps to it. The cleanup itself still runs, by
+	 * fall-through, for the failures further down.
+	 */
+	exit_files(p); /* blocking */
+bad_fork_cleanup_semundo:
+	exit_sem(p);
+bad_fork_cleanup_security:
+	security_task_free(p);
+bad_fork_cleanup_audit:
+	audit_free(p);
+bad_fork_cleanup_perf:
+	perf_event_free_task(p);
+bad_fork_sched_cancel_fork:
+	sched_cancel_fork(p);
+bad_fork_cleanup_policy:
+	lockdep_free_task(p);
+#ifdef CONFIG_NUMA
+	mpol_put(p->mempolicy);
+#endif
+bad_fork_cleanup_delayacct:
+	io_uring_free(p);
+	delayacct_tsk_free(p);
+bad_fork_cleanup_count:
+	dec_rlimit_ucounts(task_ucounts(p), UCOUNT_RLIMIT_NPROC, 1);
+	exit_cred_namespaces(p);
+	exit_creds(p);
+bad_fork_free:
+	WRITE_ONCE(p->__state, TASK_DEAD);
+	exit_task_stack_account(p);
+	put_task_stack(p);
+	delayed_free_task(p);
+fork_out:
+	spin_lock_irq(&current->sighand->siglock);
+	hlist_del_init(&delayed.node);
+	spin_unlock_irq(&current->sighand->siglock);
+	return ERR_PTR(retval);
+}
+
+/**
+ * shadow_kernel_clone - create an IPC-class shadow clone of current
+ * @reaper: kthread that owns and reaps the shadow (must ignore SIGCHLD)
+ * @cpu: the classifier cpu this shadow is bound to
+ *
+ * Trimmed analogue of kernel_clone(). Returns the shadow *parked* - pinned to
+ * @cpu but left in TASK_NEW, never woken, so it sits on no runqueue until the
+ * caller starts it with wake_up_new_task() when its turn begins. See
+ * context.md for why forking and waking are split like this.
+ *
+ * Must be called with current == the task to be sampled, from a sleepable,
+ * lock-free context (a task_work callback). Returns the shadow with a
+ * reference held (put_task_struct() to drop), or ERR_PTR on failure.
+ */
+struct task_struct *shadow_kernel_clone(struct task_struct *reaper, int cpu)
+{
+	struct kernel_clone_args args = {
+		.exit_signal = SIGCHLD,
+		/* no_files: shadow dies on first syscall, ->files unreachable.
+		 * CLONE_CLEAR_SIGHAND: a throwaway must not run the target's
+		 * handlers.
+		 */
+		.no_files = 1,
+		.flags = CLONE_CLEAR_SIGHAND,
+	};
+	struct task_struct *p;
+	int retval;
+
+	p = shadow_copy_process(reaper, NULL, 0, NUMA_NO_NODE, &args);
+	add_latent_entropy();
+
+	if (IS_ERR(p))
+		return p;
+
+	/*
+	 * copy_thread() zeroes childregs->ax, correct for a real fork() but
+	 * not here: the shadow resumes wherever the target's own tick fired,
+	 * mid-instruction, with RAX live - zeroing it corrupts the next
+	 * instruction. Restore the target's real RAX. See context.md.
+	 */
+	task_pt_regs(p)->ax = current_pt_regs()->ax;
+
+	/* Belt and braces: never leave a core dump if a shadow dies on some
+	 * fatal signal other than our own SIGKILL. See set_dumpable() above.
+	 */
+	p->signal->rlim[RLIMIT_CORE].rlim_cur = 0;
+
+	trace_sched_process_fork(current, p);
+
+	if (IS_ENABLED(CONFIG_LRU_GEN_WALKS_MMU)) {
+		/* lock the task to synchronize with memcg migration */
+		task_lock(p);
+		lru_gen_add_mm(p->mm);
+		task_unlock(p);
+	}
+
+	/* Link before the shadow can run, so the target's write-fault path
+	 * never sees an unlinked-but-executing shadow. Unlink happens in
+	 * exit_mmap(), so no unwind is needed on a later failure here.
+	 */
+	if (p->mm && current->mm)
+		ipcc_stash_link_shadow(p->mm, current->mm);
+
+	/* Reference handed to the caller; see put_task_struct() in the doc. */
+	get_task_struct(p);
+
+	/* Bind, don't wake - safe on TASK_NEW, off any runqueue. */
+	retval = set_cpus_allowed_ptr(p, cpumask_of(cpu));
+	if (retval) {
+		/* Only reachable if the classifier cpu went inactive in
+		 * between. copy_process() can't be undone; kill and wake (in
+		 * that order - TASK_NEW ignores a bare SIGKILL) instead.
+		 */
+		WARN_ON_ONCE(1);
+		send_sig(SIGKILL, p, 1);
+		wake_up_new_task(p);
+		put_task_struct(p);
+		return ERR_PTR(retval);
+	}
+
+	return p;
+}
+#endif /* CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER */
 
 static inline void init_idle_pids(struct task_struct *idle)
 {

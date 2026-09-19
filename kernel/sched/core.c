@@ -3293,7 +3293,7 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 }
 #endif /* CONFIG_SMP */
 
-#ifdef CONFIG_NUMA_BALANCING
+#if defined(CONFIG_NUMA_BALANCING) || defined(CONFIG_IPC_CLASSES)
 static void __migrate_swap_task(struct task_struct *p, int cpu)
 {
 	if (task_on_rq_queued(p)) {
@@ -3391,13 +3391,15 @@ int migrate_swap(struct task_struct *cur, struct task_struct *p,
 	if (!cpumask_test_cpu(arg.src_cpu, arg.dst_task->cpus_ptr))
 		goto out;
 
+#ifdef CONFIG_NUMA_BALANCING
 	trace_sched_swap_numa(cur, arg.src_cpu, p, arg.dst_cpu);
+#endif
 	ret = stop_two_cpus(arg.dst_cpu, arg.src_cpu, migrate_swap_stop, &arg);
 
 out:
 	return ret;
 }
-#endif /* CONFIG_NUMA_BALANCING */
+#endif /* CONFIG_NUMA_BALANCING || CONFIG_IPC_CLASSES */
 
 /***
  * kick_process - kick a running thread to enter/exit the kernel
@@ -4393,6 +4395,15 @@ static void __sched_fork(u64 clone_flags, struct task_struct *p)
 	p->ipcc = 0;
 	p->ipcc_prev = 0;
 	p->ipcc_stable_count = 0;
+	p->ipcc_confirm_count = 0;
+	memset(p->ipcc_class_weight, 0, sizeof(p->ipcc_class_weight));
+	/* ipcc_shadow_last_turn NOT stamped here - see sched_fork(); ktime_get()
+	 * isn't safe yet when sched_init() calls this for the idle task.
+	 */
+#endif
+#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
+	/* dup_task_struct() copied current byte-for-byte; reset, don't inherit. */
+	p->ipcc_shadow_status = IPCC_SHADOW_NONE;
 #endif
 
 	p->on_rq			= 0;
@@ -4633,6 +4644,13 @@ late_initcall(sched_core_sysctl_init);
 int sched_fork(u64 clone_flags, struct task_struct *p)
 {
 	__sched_fork(clone_flags, p);
+
+#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
+	/* Safe here (unlike __sched_fork()): always well after timekeeping_init().
+	 * Resets lag to 0 instead of inheriting the parent's via dup_task_struct().
+	 */
+	p->ipcc_shadow_last_turn = ktime_get();
+#endif
 	/*
 	 * We mark the process as NEW here. This guarantees that
 	 * nobody will actually run it, and a signal or other external
@@ -5567,6 +5585,11 @@ void sched_tick(bool user_tick)
 	}
 
 	rq_lock(rq, &rf);
+
+	/* load_avg_ipcc refresh rides entity_tick()'s existing per-level walk
+	 * (kernel/sched/fair.c) instead of happening here - see
+	 * update_entity_load_avg_ipcc() there.
+	 */
 	donor = rq->donor;
 
 	psi_account_irqtime(rq, donor, NULL);
@@ -8030,7 +8053,7 @@ int task_can_attach(struct task_struct *p)
 
 bool sched_smp_initialized __read_mostly;
 
-#ifdef CONFIG_NUMA_BALANCING
+#if defined(CONFIG_NUMA_BALANCING) || defined(CONFIG_IPC_CLASSES)
 /* Migrate current task p to target_cpu */
 int migrate_task_to(struct task_struct *p, int target_cpu)
 {
@@ -8045,10 +8068,14 @@ int migrate_task_to(struct task_struct *p, int target_cpu)
 
 	/* TODO: This is not properly updating schedstats */
 
+#ifdef CONFIG_NUMA_BALANCING
 	trace_sched_move_numa(p, curr_cpu, target_cpu);
+#endif
 	return stop_one_cpu(curr_cpu, migration_cpu_stop, &arg);
 }
+#endif /* CONFIG_NUMA_BALANCING || CONFIG_IPC_CLASSES */
 
+#ifdef CONFIG_NUMA_BALANCING
 /*
  * Requeue a task on a given node and accurately track the number of NUMA
  * tasks on the runqueues

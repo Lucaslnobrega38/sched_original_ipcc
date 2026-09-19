@@ -4743,6 +4743,9 @@ unsigned long clean_record_shared_mapping_range(struct address_space *mapping,
 
 unsigned long wp_shared_mapping_range(struct address_space *mapping,
 				      pgoff_t first_index, pgoff_t nr);
+
+unsigned long wp_shared_mapping_vma(struct vm_area_struct *vma,
+				    unsigned long start, unsigned long end);
 #endif
 
 #ifdef CONFIG_ANON_VMA_NAME

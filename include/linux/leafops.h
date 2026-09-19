@@ -435,6 +435,25 @@ static inline bool softleaf_is_guard_marker(softleaf_t entry)
 }
 
 /**
+ * softleaf_is_ipcc_stash_marker() - Is this leaf entry an IPCC shadow stash
+ * marker?
+ * @entry: Leaf entry.
+ *
+ * Only ever present in the address space of an IPCC classifier shadow clone,
+ * installed at fork time over its writable-shared pages. See
+ * PTE_MARKER_IPCC_STASH (swapops.h).
+ *
+ * Returns: true if the leaf entry is an IPCC stash marker, otherwise false.
+ */
+static inline bool softleaf_is_ipcc_stash_marker(softleaf_t entry)
+{
+	if (!softleaf_is_marker(entry))
+		return false;
+
+	return softleaf_to_marker(entry) & PTE_MARKER_IPCC_STASH;
+}
+
+/**
  * softleaf_is_uffd_wp_marker() - Is this leaf entry a userfautlfd write protect
  * marker?
  * @entry: Leaf entry.

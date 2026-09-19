@@ -297,7 +297,13 @@ typedef unsigned long pte_marker;
  * PROT_NONE, rather than if they were a memory hole or equivalent.
  */
 #define  PTE_MARKER_GUARD			BIT(2)
-#define  PTE_MARKER_MASK			(BIT(3) - 1)
+/*
+ * Installed over an IPCC shadow clone's writable-shared pages so its first
+ * access (read or write) traps instead of reaching the target's live page.
+ * See mm/ipcc_stash.c and context.md.
+ */
+#define  PTE_MARKER_IPCC_STASH			BIT(3)
+#define  PTE_MARKER_MASK			(BIT(4) - 1)
 
 static inline swp_entry_t make_pte_marker_entry(pte_marker marker)
 {
@@ -317,6 +323,11 @@ static inline swp_entry_t make_poisoned_swp_entry(void)
 static inline swp_entry_t make_guard_swp_entry(void)
 {
 	return make_pte_marker_entry(PTE_MARKER_GUARD);
+}
+
+static inline swp_entry_t make_ipcc_stash_swp_entry(void)
+{
+	return make_pte_marker_entry(PTE_MARKER_IPCC_STASH);
 }
 
 struct page_vma_mapped_walk;

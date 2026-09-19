@@ -52,6 +52,7 @@
 #include <linux/pagemap.h>
 #include <linux/memremap.h>
 #include <linux/kmsan.h>
+#include <linux/ipcc_stash.h>
 #include <linux/ksm.h>
 #include <linux/rmap.h>
 #include <linux/export.h>
@@ -1783,6 +1784,10 @@ static inline int zap_nonpresent_ptes(struct mmu_gather *tlb,
 		 */
 		if (!zap_drop_markers(details))
 			return 1;
+	} else if (softleaf_is_ipcc_stash_marker(entry)) {
+		/* No pfn to release - the folio lives on the shadow mm's
+		 * stash list, drained by ipcc_stash_unlink_shadow().
+		 */
 	} else if (softleaf_is_hwpoison(entry) ||
 		   softleaf_is_poison_marker(entry)) {
 		if (!should_zap_cows(details))
@@ -3969,6 +3974,56 @@ static vm_fault_t wp_pfn_shared(struct vm_fault *vmf)
 	return 0;
 }
 
+#ifdef CONFIG_IPC_CLASSES_SHADOW_DEFER_COW
+/*
+ * The target's first write to a writable-shared page since a shadow was
+ * forked from it (shadow_protect_target_shared(), kernel/fork.c, write-
+ * protected this pte at fork for exactly this trap). Captures the pre-write
+ * contents into the shadow's stash, then lets the write proceed in place -
+ * pte stays writable, page never traps again this shadow's lifetime.
+ *
+ * Known gap, not closed here: the copy runs with no lock against a
+ * *different* process concurrently writing the same shared page - a
+ * snapshot-consistency gap, not a memory-safety one. See context.md.
+ */
+static vm_fault_t ipcc_stash_wp_shared(struct vm_fault *vmf, struct folio *folio)
+	__releases(vmf->ptl)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	unsigned long addr = vmf->address & PAGE_MASK;
+	struct page *src = vmf->page;
+	struct folio *stash;
+	vm_fault_t ret;
+
+	folio_get(folio);
+	pte_unmap_unlock(vmf->pte, vmf->ptl);
+
+	/* Best-effort: on any failure the write proceeds normally regardless. */
+	stash = folio_prealloc(vma->vm_mm, vma, addr, false);
+	if (!stash) {
+		ipcc_stash_count(IPCC_STASH_DECLINED_NOMEM);
+	} else if (copy_mc_user_highpage(&stash->page, src, addr, vma)) {
+		/* Machine check on the source - leave it to the normal path. */
+		folio_put(stash);
+	} else if (!ipcc_stash_offer(vma->vm_mm, addr, stash)) {
+		folio_put(stash);
+	}
+
+	/* Rejoin wp_page_shared()'s no-page_mkwrite tail (shmem defines none). */
+	ret = finish_mkwrite_fault(vmf, folio);
+	if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE))) {
+		folio_put(folio);
+		return ret;
+	}
+
+	folio_lock(folio);
+	ret |= fault_dirty_shared_page(vmf);
+	folio_put(folio);
+
+	return ret;
+}
+#endif /* CONFIG_IPC_CLASSES_SHADOW_DEFER_COW */
+
 static vm_fault_t wp_page_shared(struct vm_fault *vmf, struct folio *folio)
 	__releases(vmf->ptl)
 {
@@ -4206,6 +4261,20 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 			vmf->page = NULL;
 			return wp_pfn_shared(vmf);
 		}
+#ifdef CONFIG_IPC_CLASSES_SHADOW_DEFER_COW
+		/*
+		 * This pte is only write-protected at all because a shadow
+		 * clone of this task is alive and needs a snapshot of the page
+		 * before this write lands - ordinary VM_SHARED mappings are
+		 * never write-protected at fork. Large folios are left to the
+		 * stock path: the stash works a page at a time.
+		 */
+		if (ipcc_stash_active() && ipcc_mm_has_shadows(vma->vm_mm)) {
+			if (!folio_test_large(folio))
+				return ipcc_stash_wp_shared(vmf, folio);
+			ipcc_stash_count(IPCC_STASH_DECLINED_LARGE);
+		}
+#endif
 		return wp_page_shared(vmf, folio);
 	}
 
@@ -4230,6 +4299,11 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 	/*
 	 * Ok, we need to copy. Oh, well..
 	 */
+
+	/* Measurement only, no behaviour change - see the helper. */
+	if (folio && folio_test_anon(folio))
+		ipcc_stash_note_parent_wp_copy(vma->vm_mm);
+
 	if (folio)
 		folio_get(folio);
 
@@ -4493,6 +4567,67 @@ static vm_fault_t pte_marker_handle_uffd_wp(struct vm_fault *vmf)
 	return do_pte_missing(vmf);
 }
 
+#ifdef CONFIG_IPC_CLASSES_SHADOW_DEFER_COW
+/*
+ * A shadow touching one of its defanged writable-shared pages for the first
+ * time (marker installed at fork by ipcc_stash_arm_vma(), traps reads too).
+ *
+ * If the target already wrote this page since the fork, its pre-write
+ * contents are waiting in the stash (ipcc_stash_offer()) - install them.
+ * Otherwise the live page still *is* the fork-time content, so fall through
+ * to the ordinary fault - but with FAULT_FLAG_WRITE forced, which is
+ * load-bearing, not incidental: with VM_SHARED already cleared, do_fault()
+ * picks do_read_fault() vs do_cow_fault() on that flag, and a plain read
+ * would install a pte pointing straight at the live shmem page. Forcing it
+ * guarantees do_cow_fault()'s private copy instead. See context.md.
+ */
+static vm_fault_t ipcc_stash_fault(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	unsigned long addr = vmf->address & PAGE_MASK;
+	struct folio *folio;
+	vm_fault_t ret;
+	pte_t entry;
+
+	folio = ipcc_stash_take(vma->vm_mm, addr);
+	if (!folio) {
+		vmf->flags |= FAULT_FLAG_WRITE;
+		return do_pte_missing(vmf);
+	}
+
+	ret = vmf_anon_prepare(vmf);
+	if (ret) {
+		folio_put(folio);
+		return ret;
+	}
+
+	__folio_mark_uptodate(folio);
+
+	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd, vmf->address,
+				       &vmf->ptl);
+	if (!vmf->pte || !pte_same(ptep_get(vmf->pte), vmf->orig_pte)) {
+		/* Raced with something else resolving this address; drop and retry. */
+		if (vmf->pte)
+			pte_unmap_unlock(vmf->pte, vmf->ptl);
+		folio_put(folio);
+		return 0;
+	}
+
+	entry = folio_mk_pte(folio, vma->vm_page_prot);
+	entry = maybe_mkwrite(pte_mkdirty(entry), vma);
+
+	inc_mm_counter(vma->vm_mm, MM_ANONPAGES);
+	folio_add_new_anon_rmap(folio, vma, addr, RMAP_EXCLUSIVE);
+	folio_add_lru_vma(folio, vma);
+	set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
+	update_mmu_cache_range(vmf, vma, vmf->address, vmf->pte, 1);
+
+	pte_unmap_unlock(vmf->pte, vmf->ptl);
+
+	return 0;
+}
+#endif /* CONFIG_IPC_CLASSES_SHADOW_DEFER_COW */
+
 static vm_fault_t handle_pte_marker(struct vm_fault *vmf)
 {
 	const softleaf_t entry = softleaf_from_pte(vmf->orig_pte);
@@ -4515,6 +4650,11 @@ static vm_fault_t handle_pte_marker(struct vm_fault *vmf)
 
 	if (softleaf_is_uffd_wp_marker(entry))
 		return pte_marker_handle_uffd_wp(vmf);
+
+#ifdef CONFIG_IPC_CLASSES_SHADOW_DEFER_COW
+	if (marker & PTE_MARKER_IPCC_STASH)
+		return ipcc_stash_fault(vmf);
+#endif
 
 	/* This is an unknown pte marker */
 	return VM_FAULT_SIGBUS;
