@@ -1,0 +1,881 @@
+  DESCEND objtool
+  DESCEND bpf/resolve_btfids
+  INSTALL libsubcmd_headers
+  INSTALL libsubcmd_headers
+  CC      kernel/bounds.s
+  CC      arch/x86/kernel/asm-offsets.s
+  CC      kernel/sched/rq-offsets.s
+  CALL    scripts/checksyscalls.sh
+  GEN     scripts/gdb/linux/constants.py
+make[3]: *** No rule to make target 'debian/canonical-certs.pem', needed by 'certs/x509_certificate_list'.  Stop.
+make[3]: *** Waiting for unfinished jobs....
+  CC      certs/system_keyring.o
+  AS      arch/x86/boot/startup/efi-mixed.o
+  CC      init/main.o
+  CC      ipc/compat.o
+  AS      arch/x86/boot/startup/la57toggle.o
+  CC      arch/x86/boot/startup/gdt_idt.o
+  CC      security/keys/gc.o
+  CC      block/bdev.o
+  CC      io_uring/io_uring.o
+  CC      fs/open.o
+  CC      kernel/fork.o
+  CC      mm/filemap.o
+  CC      security/keys/key.o
+  CC      crypto/api.o
+  CC      arch/x86/boot/startup/map_kernel.o
+make[2]: *** [scripts/Makefile.build:546: certs] Error 2
+make[2]: *** Waiting for unfinished jobs....
+  CC      arch/x86/coco/core.o
+  CC      ipc/util.o
+  CC      arch/x86/boot/startup/sme.o
+  CC      arch/x86/coco/tdx/debug.o
+  CC      kernel/exec_domain.o
+  CC      arch/x86/coco/tdx/tdx.o
+  CC      crypto/cipher.o
+  CC      security/keys/keyring.o
+  CC      arch/x86/boot/startup/sev-startup.o
+  CC      block/fops.o
+  CC      crypto/algapi.o
+  CC      init/do_mounts.o
+  CC      ipc/msgutil.o
+  CC      fs/read_write.o
+  CC      security/commoncap.o
+  CC      arch/x86/coco/tdx/tdx-shared.o
+  AR      arch/x86/boot/startup/lib.a
+  CC      ipc/msg.o
+  OBJCOPY arch/x86/boot/startup/gdt_idt.pi.o
+  OBJCOPY arch/x86/boot/startup/map_kernel.pi.o
+  OBJCOPY arch/x86/boot/startup/sme.pi.o
+  OBJCOPY arch/x86/boot/startup/sev-startup.pi.o
+  AR      arch/x86/boot/startup/built-in.a
+  CC      io_uring/opdef.o
+  AR      arch/x86/coco/tdx/built-in.a
+  CC      arch/x86/coco/sev/core.o
+  CC      kernel/panic.o
+  CC      security/keys/keyctl.o
+  CC      block/bio.o
+  CC      init/do_mounts_initrd.o
+  CC      crypto/scatterwalk.o
+  CC      io_uring/kbuf.o
+  CC      kernel/cpu.o
+  CC      ipc/sem.o
+  AS      arch/x86/entry/entry.o
+  CC      init/initramfs.o
+  CC      crypto/proc.o
+  CC      fs/file_table.o
+  CC      security/keys/permission.o
+  CC      arch/x86/coco/sev/noinstr.o
+  AS      arch/x86/entry/entry_64.o
+  CC      io_uring/rsrc.o
+  CC      mm/mempool.o
+  CC      ipc/shm.o
+  CC      crypto/aead.o
+  CC      arch/x86/entry/syscall_64.o
+  CC      arch/x86/coco/sev/vc-handle.o
+  CC      init/calibrate.o
+  CC      security/keys/process_keys.o
+  CC      fs/super.o
+  CC      mm/oom_kill.o
+  CC      init/init_task.o
+  CC      arch/x86/events/core.o
+  CC      block/elevator.o
+  CC      kernel/exit.o
+  CC      crypto/geniv.o
+  CC      init/version.o
+  CC      arch/x86/entry/vdso/vma.o
+  CC      io_uring/notif.o
+  CC      ipc/syscall.o
+  CC      security/keys/request_key.o
+  CC      arch/x86/coco/sev/svsm.o
+  AR      init/built-in.a
+  CC      io_uring/tctx.o
+  AR      arch/x86/coco/sev/built-in.a
+  CC      block/blk-core.o
+  AR      arch/x86/coco/built-in.a
+  CC      arch/x86/entry/vdso/extable.o
+  CC      ipc/ipc_sysctl.o
+  CC      crypto/lskcipher.o
+  CC      security/keys/request_key_auth.o
+  CC      fs/char_dev.o
+  CC      block/blk-sysfs.o
+  CC      mm/fadvise.o
+  CC      arch/x86/xen/enlighten.o
+  CC      io_uring/filetable.o
+  CC      ipc/mqueue.o
+  CC      kernel/softirq.o
+  CC      arch/x86/entry/vdso/vdso32-setup.o
+  CC      security/keys/user_defined.o
+  CC      crypto/skcipher.o
+  CC      mm/maccess.o
+  CC      arch/x86/xen/mmu.o
+  CC      arch/x86/events/probe.o
+  CC      arch/x86/entry/vsyscall/vsyscall_64.o
+  CC      fs/stat.o
+  CC      io_uring/rw.o
+  CC      arch/x86/entry/vdso/vdso64/vclock_gettime.o
+  CC      security/keys/compat.o
+  CC      arch/x86/events/utils.o
+  CC      mm/page-writeback.o
+  CC      arch/x86/xen/time.o
+  CC      arch/x86/entry/vdso/vdso64/vgetcpu.o
+  CC      arch/x86/entry/vdso/vdso64/vgetrandom.o
+  CC      security/keys/compat_dh.o
+  AR      arch/x86/entry/vsyscall/built-in.a
+  CC      crypto/bpf_crypto_skcipher.o
+  CC      kernel/resource.o
+  VDSO    arch/x86/entry/vdso/vdso64/vdso64.so.dbg
+  OBJCOPY arch/x86/entry/vdso/vdso64/vdso64.so
+  VDSO2C  arch/x86/entry/vdso/vdso64/vdso64-image.c
+  CC      arch/x86/entry/vdso/vdso64/vdso64-image.o
+  CC      arch/x86/entry/vdso/vdso32/vclock_gettime.o
+  CC      ipc/namespace.o
+  CC      io_uring/poll.o
+  AR      arch/x86/entry/vdso/vdso64/built-in.a
+  CC      block/blk-flush.o
+  CC      arch/x86/xen/grant-table.o
+  CC      crypto/seqiv.o
+  CC      fs/exec.o
+  CC      security/keys/proc.o
+  CC      arch/x86/events/amd/core.o
+  CC      arch/x86/events/amd/lbr.o
+  CC      ipc/mq_sysctl.o
+  CC      security/keys/sysctl.o
+  CC      arch/x86/entry/vdso/vdso32/vgetcpu.o
+  AS      arch/x86/entry/vdso/vdso32/system_call.o
+  CC      arch/x86/xen/suspend.o
+  VDSO    arch/x86/entry/vdso/vdso32/vdso32.so.dbg
+  OBJCOPY arch/x86/entry/vdso/vdso32/vdso32.so
+  AR      ipc/built-in.a
+  VDSO2C  arch/x86/entry/vdso/vdso32/vdso32-image.c
+  CC      arch/x86/events/msr.o
+  CC      arch/x86/entry/vdso/vdso32/vdso32-image.o
+  CC      crypto/ahash.o
+  CC      block/blk-settings.o
+  AR      arch/x86/entry/vdso/vdso32/built-in.a
+  AR      arch/x86/entry/vdso/built-in.a
+  AS      arch/x86/entry/thunk.o
+  CC      mm/folio-compat.o
+  CC      security/keys/persistent.o
+  CC      arch/x86/events/amd/brs.o
+  CC      kernel/sysctl.o
+  AS      arch/x86/entry/entry_64_fred.o
+  CC      arch/x86/xen/enlighten_hvm.o
+  CC      arch/x86/platform/pvh/enlighten.o
+  CC      io_uring/tw.o
+  CC      io_uring/wait.o
+  CC      security/keys/dh.o
+  CC      block/blk-ioc.o
+  CC      arch/x86/entry/entry_fred.o
+  CC      mm/readahead.o
+  CC      arch/x86/events/amd/ibs.o
+  CC      fs/pipe.o
+  AS      arch/x86/platform/pvh/head.o
+  CC      security/keys/keyctl_pkey.o
+  AR      arch/x86/platform/pvh/built-in.a
+  CC      io_uring/eventfd.o
+  CC      crypto/shash.o
+  CC      security/lsm_syscalls.o
+  CC      arch/x86/xen/mmu_hvm.o
+  CC      kernel/capability.o
+  CC      block/blk-map.o
+  AS      arch/x86/entry/entry_64_compat.o
+  CC      security/keys/big_key.o
+  CC      arch/x86/entry/syscall_32.o
+  CC      block/blk-merge.o
+  CC      io_uring/uring_cmd.o
+  CC      arch/x86/xen/suspend_hvm.o
+  CC      mm/swap.o
+  CC      arch/x86/events/intel/core.o
+  CC      kernel/ptrace.o
+  CC      arch/x86/events/amd/iommu.o
+  CC      security/keys/trusted-keys/trusted_core.o
+  CC      crypto/akcipher.o
+  CC      arch/x86/events/intel/bts.o
+  CC      fs/namei.o
+  CC      arch/x86/xen/platform-pci-unplug.o
+  CC      io_uring/openclose.o
+  AR      arch/x86/entry/built-in.a
+  CC      block/blk-timeout.o
+  CC      security/min_addr.o
+  CC      security/keys/trusted-keys/trusted_tpm1.o
+  CC [M]  arch/x86/events/amd/uncore.o
+  CC      kernel/user.o
+  CC      arch/x86/xen/setup.o
+  AR      arch/x86/events/amd/built-in.a
+  CC      arch/x86/events/intel/ds.o
+  CC      block/blk-lib.o
+  CC      crypto/sig.o
+  CC      io_uring/sqpoll.o
+  CC      security/security.o
+  CC      kernel/signal.o
+  CC      security/keys/trusted-keys/trusted_tpm2.o
+  CC      mm/truncate.o
+  CC      block/blk-mq.o
+  CC      crypto/kpp.o
+  LD [M]  arch/x86/events/amd/amd-uncore.o
+  CC      crypto/dh.o
+  CC      arch/x86/xen/apic.o
+  CC      io_uring/xattr.o
+  AR      security/keys/trusted-keys/built-in.a
+  CC      security/keys/encrypted-keys/encrypted.o
+  CC      arch/x86/xen/pmu.o
+  CC      security/lsm_notifier.o
+  CC      crypto/dh_helper.o
+  CC      mm/vmscan.o
+  CC      block/blk-mq-tag.o
+  CC      arch/x86/events/intel/knc.o
+  CC      arch/x86/events/zhaoxin/core.o
+  CC      io_uring/nop.o
+  CC      crypto/rsa.o
+  CC      arch/x86/xen/suspend_pv.o
+  CC      security/keys/encrypted-keys/masterkey_trusted.o
+  CC      io_uring/fs.o
+  CC      crypto/rsa_helper.o
+  AR      arch/x86/events/zhaoxin/built-in.a
+  CC      arch/x86/xen/p2m.o
+  CC      arch/x86/events/intel/lbr.o
+  CC      crypto/rsa-pkcs1pad.o
+  CC      fs/fcntl.o
+  AR      security/keys/encrypted-keys/built-in.a
+  AR      security/keys/built-in.a
+  CC      crypto/rsassa-pkcs1.o
+  CC      kernel/sys.o
+  CC      io_uring/splice.o
+  CC      arch/x86/hyperv/hv_init.o
+  CC      arch/x86/xen/enlighten_pv.o
+  CC      mm/shrinker.o
+  CC      crypto/acompress.o
+  CC      arch/x86/realmode/init.o
+  CC      arch/x86/events/intel/p4.o
+  CC      io_uring/sync.o
+  CC      fs/ioctl.o
+  AS      arch/x86/realmode/rm/trampoline_64.o
+  AS      arch/x86/realmode/rm/reboot.o
+  AS      arch/x86/realmode/rm/wakeup_asm.o
+  CC      arch/x86/realmode/rm/wakemain.o
+  CC      arch/x86/realmode/rm/video-mode.o
+  CC      arch/x86/events/intel/p6.o
+  CC      arch/x86/hyperv/mmu.o
+  CC      block/blk-mq-dma.o
+  CC      arch/x86/realmode/rm/regs.o
+  CC      arch/x86/realmode/rm/video-vga.o
+  CC      arch/x86/realmode/rm/video-vesa.o
+  CC      arch/x86/realmode/rm/video-bios.o
+  CC      crypto/scompress.o
+  PASYMS  arch/x86/realmode/rm/pasyms.h
+  LDS     arch/x86/realmode/rm/realmode.lds
+  CC      io_uring/msg_ring.o
+  LD      arch/x86/realmode/rm/realmode.elf
+  RELOCS  arch/x86/realmode/rm/realmode.relocs
+  OBJCOPY arch/x86/realmode/rm/realmode.bin
+  AS      arch/x86/realmode/rmpiggy.o
+  AR      arch/x86/realmode/built-in.a
+  CC      arch/x86/events/intel/pt.o
+  CC      io_uring/advise.o
+  CC      kernel/umh.o
+  CC      arch/x86/xen/mmu_pv.o
+  CC      fs/readdir.o
+  CC      security/lsm_init.o
+  CC      block/blk-stat.o
+  CC      mm/shmem.o
+  CC      crypto/algboss.o
+  CC      io_uring/statx.o
+  CC      kernel/workqueue.o
+  CC      arch/x86/hyperv/nested.o
+  CC      block/blk-mq-sysfs.o
+  CC      fs/select.o
+  CC      block/blk-mq-cpumap.o
+  CC      arch/x86/events/intel/uncore.o
+  CC      arch/x86/hyperv/irqdomain.o
+  CC      crypto/testmgr.o
+  CC      io_uring/timeout.o
+  CC [M]  arch/x86/events/rapl.o
+  CC      arch/x86/hyperv/ivm.o
+  CC      crypto/hmac.o
+  CC      block/blk-mq-sched.o
+  CC      io_uring/cancel.o
+  CC      arch/x86/xen/irq.o
+  CC      security/inode.o
+  CC      crypto/crypto_null.o
+  CC      block/ioctl.o
+  CC      arch/x86/events/intel/uncore_nhmex.o
+  CC      fs/dcache.o
+  AS      arch/x86/kernel/head_64.o
+  CC      arch/x86/xen/multicalls.o
+  CC      arch/x86/hyperv/hv_apic.o
+  CC      io_uring/waitid.o
+  CC      crypto/md5.o
+  CC      arch/x86/kernel/head64.o
+  CC      kernel/pid.o
+  CC      crypto/sha1.o
+  CC      io_uring/register.o
+  CC      security/selinux/avc.o
+  CC      mm/util.o
+  AS      arch/x86/xen/xen-asm.o
+  CC      arch/x86/hyperv/hv_spinlock.o
+  CC      arch/x86/xen/enlighten_pvh.o
+  CC      arch/x86/kernel/ebda.o
+  CC      arch/x86/events/intel/uncore_snb.o
+  CC      block/genhd.o
+  CC      arch/x86/hyperv/hv_crash.o
+  CC      crypto/sha256.o
+  CC      arch/x86/kernel/platform-quirks.o
+  CC      security/smack/smack_lsm.o
+  CC      arch/x86/xen/trace.o
+  CC      arch/x86/kernel/process_64.o
+  CC      crypto/sha512.o
+  CC      arch/x86/events/intel/uncore_snbep.o
+  AS      arch/x86/hyperv/hv_trampoline.o
+  CC      kernel/task_work.o
+  AR      arch/x86/hyperv/built-in.a
+  CC      fs/inode.o
+  CC      io_uring/truncate.o
+  CC      security/selinux/hooks.o
+  CC      mm/mmzone.o
+  CC      fs/attr.o
+  CC      block/ioprio.o
+  CC      crypto/sha3.o
+  CC      kernel/extable.o
+  CC      io_uring/memmap.o
+  CC      arch/x86/kernel/signal.o
+  CC      mm/vmstat.o
+  CC      crypto/ecb.o
+  CC      kernel/params.o
+  CC      block/badblocks.o
+  CC      arch/x86/xen/smp.o
+  CC      arch/x86/kernel/signal_64.o
+  CC      arch/x86/events/intel/uncore_discovery.o
+  CC      io_uring/alloc_cache.o
+  CC      arch/x86/mm/init.o
+  CC      crypto/cbc.o
+  CC      security/smack/smack_access.o
+  CC      arch/x86/xen/smp_pv.o
+  CC      io_uring/query.o
+  CC      crypto/cts.o
+  CC      arch/x86/kernel/traps.o
+  CC      block/partitions/core.o
+  CC      fs/bad_inode.o
+  CC      mm/backing-dev.o
+  CC [M]  arch/x86/events/intel/cstate.o
+  CC      kernel/kthread.o
+  CC      crypto/xts.o
+  CC      security/smack/smackfs.o
+  CC      io_uring/zcrx.o
+  CC      arch/x86/mm/init_64.o
+  CC      fs/file.o
+  CC      arch/x86/kernel/idt.o
+  CC      block/partitions/amiga.o
+  CC      arch/x86/xen/smp_hvm.o
+  AR      arch/x86/events/intel/built-in.a
+  LD [M]  arch/x86/events/intel/intel-cstate.o
+  AR      arch/x86/events/built-in.a
+  CC      security/smack/smack_netfilter.o
+  CC      crypto/ctr.o
+  CC      mm/mm_init.o
+  CC      arch/x86/xen/spinlock.o
+  CC      arch/x86/kernel/irq.o
+  CC      block/partitions/atari.o
+  CC      security/selinux/selinuxfs.o
+  CC      arch/x86/mm/fault.o
+  CC      crypto/gcm.o
+  CC      kernel/nsproxy.o
+  AR      security/smack/built-in.a
+  CC      security/selinux/netlink.o
+  CC      kernel/nstree.o
+  CC      arch/x86/xen/vga.o
+  CC      fs/filesystems.o
+  CC      block/partitions/aix.o
+  CC      io_uring/io-wq.o
+  CC      arch/x86/xen/efi.o
+  CC      block/blk-rq-qos.o
+  CC [M]  arch/x86/crypto/twofish_glue.o
+  CC      crypto/aes.o
+  CC      block/partitions/cmdline.o
+  CC      mm/percpu.o
+  CC      arch/x86/mm/ioremap.o
+  CC      fs/namespace.o
+  CC [M]  arch/x86/crypto/twofish_glue_3way.o
+  AR      arch/x86/xen/built-in.a
+  CC      arch/x86/kernel/irq_64.o
+  CC      kernel/nscommon.o
+  CC      arch/x86/kernel/dumpstack_64.o
+  CC      security/selinux/nlmsgtab.o
+  CC      io_uring/futex.o
+  CC      crypto/deflate.o
+  CC      arch/x86/kernel/time.o
+  CC      security/lsm_audit.o
+  CC      block/partitions/mac.o
+  CC [M]  arch/x86/crypto/twofish_avx_glue.o
+  CC      kernel/notifier.o
+  CC      mm/slab_common.o
+  CC      io_uring/epoll.o
+  CC      arch/x86/kernel/ioport.o
+  CC      crypto/crc32c.o
+  CC      arch/x86/mm/extable.o
+  CC      security/selinux/netif.o
+  CC [M]  arch/x86/crypto/serpent_sse2_glue.o
+  CC      crypto/lzo.o
+  CC      block/partitions/ldm.o
+  CC      io_uring/napi.o
+  CC      kernel/ksysfs.o
+  CC      crypto/lzo-rle.o
+  CC      arch/x86/kernel/dumpstack.o
+  CC      arch/x86/mm/mmap.o
+  CC [M]  arch/x86/crypto/serpent_avx_glue.o
+  CC      fs/seq_file.o
+  CC      security/selinux/netnode.o
+  CC      crypto/rng.o
+  CC      kernel/cred.o
+  CC      arch/x86/kernel/nmi.o
+  CC      arch/x86/mm/pgtable.o
+  CC [M]  arch/x86/crypto/serpent_avx2_glue.o
+  CC      io_uring/net.o
+  CC      security/tomoyo/audit.o
+  CC      block/partitions/msdos.o
+  CC      arch/x86/mm/physaddr.o
+  CC      crypto/drbg.o
+  CC      security/selinux/netport.o
+  CC [M]  arch/x86/crypto/des3_ede_glue.o
+  CC      arch/x86/mm/tlb.o
+  CC      kernel/reboot.o
+  CC      mm/compaction.o
+  CC      arch/x86/kernel/fred.o
+  CC [M]  arch/x86/crypto/camellia_glue.o
+  CC      security/apparmor/apparmorfs.o
+  CC      block/partitions/osf.o
+  CC      security/tomoyo/common.o
+  CC      fs/xattr.o
+  CC      security/selinux/status.o
+  CC      io_uring/cmd_net.o
+  CC      arch/x86/mm/cpu_entry_area.o
+  CC [M]  arch/x86/crypto/camellia_aesni_avx_glue.o
+  CC      arch/x86/kernel/ldt.o
+  CC      kernel/async.o
+  CC      block/partitions/sgi.o
+  CC      crypto/jitterentropy-kcapi.o
+  CC      arch/x86/mm/maccess.o
+  CC      kernel/smpboot.o
+  CC [M]  arch/x86/crypto/camellia_aesni_avx2_glue.o
+  CC      arch/x86/mm/pgprot.o
+  CC      security/selinux/ss/ebitmap.o
+  CC      block/partitions/sun.o
+  CC      crypto/ghash-generic.o
+  CC      arch/x86/kernel/setup.o
+  CC      io_uring/fdinfo.o
+  CC [M]  arch/x86/crypto/blowfish_glue.o
+  CC      block/partitions/ultrix.o
+  CC      kernel/ucount.o
+  CC      fs/libfs.o
+  CC      arch/x86/mm/pat/set_memory.o
+  CC      io_uring/bpf_filter.o
+  CC      crypto/ecc.o
+  CC      mm/show_mem.o
+  CC      security/selinux/ss/hashtab.o
+  CC      kernel/regset.o
+  CC [M]  arch/x86/crypto/cast5_avx_glue.o
+  CC      security/apparmor/audit.o
+  CC      security/tomoyo/condition.o
+  CC      block/partitions/efi.o
+  CC      arch/x86/kernel/x86_init.o
+  CC      security/selinux/ss/symtab.o
+  CC      kernel/ksyms_common.o
+  CC      security/selinux/ss/sidtab.o
+  CC [M]  arch/x86/crypto/cast6_avx_glue.o
+  CC [M]  io_uring/mock_file.o
+  CC      mm/interval_tree.o
+  CC      arch/x86/kernel/i8259.o
+  CC      block/partitions/karma.o
+  CC      kernel/groups.o
+  CC      crypto/ecdh.o
+  CC      security/apparmor/capability.o
+  CC [M]  arch/x86/crypto/aegis128-aesni-glue.o
+  CC      security/selinux/ss/avtab.o
+  CC      fs/fs-writeback.o
+  CC      arch/x86/kernel/irqinit.o
+  CC      security/tomoyo/domain.o
+  CC      block/partitions/sysv68.o
+  CC      arch/x86/mm/pat/memtype.o
+  CC      mm/list_lru.o
+  AR      io_uring/built-in.a
+  CC      block/disk-events.o
+  CC      crypto/ecdh_helper.o
+  CC      kernel/vhost_task.o
+  CC [M]  arch/x86/crypto/aesni-intel_glue.o
+  CC      security/selinux/ss/policydb.o
+  CC      crypto/asymmetric_keys/asymmetric_type.o
+  AR      block/partitions/built-in.a
+  CC      kernel/sched/core.o
+  CC      block/blk-ia-ranges.o
+  CC      kernel/locking/mutex.o
+  CC      arch/x86/kernel/jump_label.o
+  CC      arch/x86/mm/pat/memtype_interval.o
+  CC      security/apparmor/task.o
+  CC      mm/workingset.o
+  CC      crypto/asymmetric_keys/restrict.o
+  CC      arch/x86/kernel/irq_work.o
+  CC      security/tomoyo/environ.o
+  AR      arch/x86/mm/pat/built-in.a
+  CC      arch/x86/mm/hugetlbpage.o
+  CC      block/early-lookup.o
+  CC      crypto/asymmetric_keys/signature.o
+  CC      arch/x86/mm/dump_pagetables.o
+  CC      kernel/locking/semaphore.o
+  CC      crypto/asymmetric_keys/public_key.o
+  CC [M]  arch/x86/crypto/ghash-clmulni-intel_glue.o
+  CC      block/bsg.o
+  CC      security/tomoyo/file.o
+  CC      arch/x86/kernel/probe_roms.o
+  CC      mm/debug.o
+  CC      security/apparmor/ipc.o
+  CC [M]  arch/x86/crypto/sm3_avx_glue.o
+  CC      kernel/locking/rwsem.o
+  CC      crypto/asymmetric_keys/x509_cert_parser.o
+  CC      arch/x86/mm/kmmio.o
+  CC      block/bsg-lib.o
+  CC      security/selinux/ss/services.o
+  CC      arch/x86/kernel/sys_ia32.o
+  CC [M]  arch/x86/crypto/sm4_aesni_avx_glue.o
+  CC      mm/gup.o
+  CC      security/tomoyo/gc.o
+  CC      crypto/asymmetric_keys/x509_loader.o
+  CC      kernel/locking/percpu-rwsem.o
+  CC      security/apparmor/lib.o
+  CC      crypto/asymmetric_keys/x509_public_key.o
+  CC      fs/pnode.o
+  CC      arch/x86/mm/pf_in.o
+  CC      block/blk-cgroup.o
+  CC [M]  arch/x86/crypto/sm4_aesni_avx2_glue.o
+  CC      arch/x86/kernel/signal_32.o
+  CC      crypto/asymmetric_keys/pkcs7_parser.o
+  CC      kernel/locking/spinlock.o
+  CC      arch/x86/mm/mmio-mod.o
+  CC [M]  arch/x86/crypto/aria_aesni_avx_glue.o
+  CC      fs/splice.o
+  CC      security/tomoyo/group.o
+  CC      kernel/locking/osq_lock.o
+  CC      crypto/asymmetric_keys/pkcs7_trust.o
+  CC      arch/x86/kernel/sys_x86_64.o
+  CC      security/apparmor/match.o
+  CC      kernel/locking/qspinlock.o
+  CC [M]  arch/x86/crypto/aria_aesni_avx2_glue.o
+  CC      crypto/asymmetric_keys/pkcs7_verify.o
+  CC      arch/x86/mm/numa.o
+  CC      block/blk-cgroup-rwstat.o
+  CC      security/tomoyo/load_policy.o
+  CC [M]  arch/x86/crypto/aria_gfni_avx512_glue.o
+  CC      crypto/asymmetric_keys/verify_pefile.o
+  CC      kernel/locking/rtmutex_api.o
+  CC      security/apparmor/path.o
+  CC      arch/x86/kernel/espfix_64.o
+  CC      security/selinux/ss/conditional.o
+  CC      arch/x86/mm/amdtopology.o
+  CC      crypto/asymmetric_keys/mscode_parser.o
+  LD [M]  arch/x86/crypto/twofish-x86_64.o
+  LD [M]  arch/x86/crypto/twofish-x86_64-3way.o
+  LD [M]  arch/x86/crypto/twofish-avx-x86_64.o
+  LD [M]  arch/x86/crypto/serpent-sse2-x86_64.o
+  CC      fs/sync.o
+  LD [M]  arch/x86/crypto/serpent-avx-x86_64.o
+  LD [M]  arch/x86/crypto/serpent-avx2.o
+  CC      block/blk-cgroup-fc-appid.o
+  LD [M]  arch/x86/crypto/des3_ede-x86_64.o
+  CC      security/tomoyo/memory.o
+  CC      mm/mmap_lock.o
+  LD [M]  arch/x86/crypto/camellia-x86_64.o
+  LD [M]  arch/x86/crypto/camellia-aesni-avx-x86_64.o
+  LD [M]  arch/x86/crypto/camellia-aesni-avx2.o
+  LD [M]  arch/x86/crypto/blowfish-x86_64.o
+  LD [M]  arch/x86/crypto/cast5-avx-x86_64.o
+  LD [M]  arch/x86/crypto/cast6-avx-x86_64.o
+  LD [M]  arch/x86/crypto/aegis128-aesni.o
+  LD [M]  arch/x86/crypto/aesni-intel.o
+  LD [M]  arch/x86/crypto/ghash-clmulni-intel.o
+  LD [M]  arch/x86/crypto/sm3-avx-x86_64.o
+  LD [M]  arch/x86/crypto/sm4-aesni-avx-x86_64.o
+  LD [M]  arch/x86/crypto/sm4-aesni-avx2-x86_64.o
+  LD [M]  arch/x86/crypto/aria-aesni-avx-x86_64.o
+  CC      arch/x86/kernel/ksysfs.o
+  LD [M]  arch/x86/crypto/aria-aesni-avx2-x86_64.o
+  LD [M]  arch/x86/crypto/aria-gfni-avx512-x86_64.o
+  CC      kernel/sched/fair.o
+  CC [M]  crypto/asymmetric_keys/pkcs8_parser.o
+  CC      kernel/locking/qrwlock.o
+  CC      arch/x86/mm/srat.o
+  CC      block/blk-throttle.o
+  CC      security/apparmor/domain.o
+  CC      security/selinux/ss/mls.o
+  CC      fs/utimes.o
+  CC      arch/x86/kernel/bootflag.o
+  CC [M]  crypto/asymmetric_keys/pkcs7_key_type.o
+  CC      arch/x86/mm/pkeys.o
+  AR      kernel/locking/built-in.a
+  CC      security/tomoyo/mount.o
+  CC      kernel/sched/build_policy.o
+In file included from ./include/linux/bitmap.h:11,
+                 from ./include/linux/cpumask.h:11,
+                 from ./include/linux/energy_model.h:4,
+                 from kernel/sched/fair.c:23:
+kernel/sched/fair.c: In function ‘compute_ipcc_score’:
+kernel/sched/fair.c:7751:18: error: ‘cpu’ undeclared (first use in this function)
+ 7751 |     for_each_cpu(cpu, sg->cpumask) {
+      |                  ^~~
+./include/linux/find.h:586:15: note: in definition of macro ‘for_each_set_bit’
+  586 |         for ((bit) = 0; (bit) = find_next_bit((addr), (size), (bit)), (bit) < (size); (bit)++)
+      |               ^~~
+kernel/sched/fair.c:7751:5: note: in expansion of macro ‘for_each_cpu’
+ 7751 |     for_each_cpu(cpu, sg->cpumask) {
+      |     ^~~~~~~~~~~~
+kernel/sched/fair.c:7751:18: note: each undeclared identifier is reported only once for each function it appears in
+ 7751 |     for_each_cpu(cpu, sg->cpumask) {
+      |                  ^~~
+./include/linux/find.h:586:15: note: in definition of macro ‘for_each_set_bit’
+  586 |         for ((bit) = 0; (bit) = find_next_bit((addr), (size), (bit)), (bit) < (size); (bit)++)
+      |               ^~~
+kernel/sched/fair.c:7751:5: note: in expansion of macro ‘for_each_cpu’
+ 7751 |     for_each_cpu(cpu, sg->cpumask) {
+      |     ^~~~~~~~~~~~
+./include/linux/cpumask_types.h:18:37: error: request for member ‘bits’ in something not a structure or union
+   18 | #define cpumask_bits(maskp) ((maskp)->bits)
+      |                                     ^~
+./include/linux/find.h:586:48: note: in definition of macro ‘for_each_set_bit’
+  586 |         for ((bit) = 0; (bit) = find_next_bit((addr), (size), (bit)), (bit) < (size); (bit)++)
+      |                                                ^~~~
+./include/linux/cpumask.h:380:31: note: in expansion of macro ‘cpumask_bits’
+  380 |         for_each_set_bit(cpu, cpumask_bits(mask), small_cpumask_bits)
+      |                               ^~~~~~~~~~~~
+kernel/sched/fair.c:7751:5: note: in expansion of macro ‘for_each_cpu’
+ 7751 |     for_each_cpu(cpu, sg->cpumask) {
+      |     ^~~~~~~~~~~~
+./include/linux/find.h:586:69: warning: left-hand operand of comma expression has no effect [-Wunused-value]
+  586 |         for ((bit) = 0; (bit) = find_next_bit((addr), (size), (bit)), (bit) < (size); (bit)++)
+      |                                                                     ^
+./include/linux/cpumask.h:380:9: note: in expansion of macro ‘for_each_set_bit’
+  380 |         for_each_set_bit(cpu, cpumask_bits(mask), small_cpumask_bits)
+      |         ^~~~~~~~~~~~~~~~
+kernel/sched/fair.c:7751:5: note: in expansion of macro ‘for_each_cpu’
+ 7751 |     for_each_cpu(cpu, sg->cpumask) {
+      |     ^~~~~~~~~~~~
+kernel/sched/fair.c: In function ‘find_ipcc_appropriate_cpu’:
+kernel/sched/fair.c:8588:5: warning: this ‘if’ clause does not guard... [-Wmisleading-indentation]
+ 8588 |     if (!sd)
+      |     ^~
+kernel/sched/fair.c:8591:9: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+ 8591 |         target = prev_cpu;
+      |         ^~~~~~
+  AR      crypto/asymmetric_keys/built-in.a
+  LD [M]  crypto/asymmetric_keys/pkcs8_key_parser.o
+kernel/sched/fair.c: At top level:
+kernel/sched/fair.c:10251:33: error: ‘NR_IPC_CLASSES’ undeclared here (not in a function); did you mean ‘CONFIG_IPC_CLASSES’?
+10251 |     unsigned int  nr_ipcc_tasks[NR_IPC_CLASSES]; // tasks por classe
+      |                                 ^~~~~~~~~~~~~~
+      |                                 CONFIG_IPC_CLASSES
+  LD [M]  crypto/asymmetric_keys/pkcs7_test_key.o
+  CC      mm/vma_init.o
+  CC      crypto/kdf_sp800108.o
+  CC      arch/x86/kernel/e820.o
+kernel/sched/fair.c:8346:12: warning: ‘find_energy_efficient_cpu’ defined but not used [-Wunused-function]
+ 8346 | static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu)
+      |            ^~~~~~~~~~~~~~~~~~~~~~~~~
+kernel/sched/fair.c:7748:12: warning: ‘compute_ipcc_score’ defined but not used [-Wunused-function]
+ 7748 | static int compute_ipcc_score(struct sched_group *sg)
+      |            ^~~~~~~~~~~~~~~~~~
+make[4]: *** [scripts/Makefile.build:289: kernel/sched/fair.o] Error 1
+make[4]: *** Waiting for unfinished jobs....
+  CC      security/yama/yama_lsm.o
+  CC      arch/x86/mm/kaslr.o
+  CC      fs/d_path.o
+  CC      security/selinux/ss/context.o
+  CC      crypto/df_sp80090a.o
+  CC      security/tomoyo/network.o
+  CC      arch/x86/mm/pti.o
+  CC      block/blk-ioprio.o
+  CC      mm/highmem.o
+  AR      security/yama/built-in.a
+  CC      mm/memory.o
+  CC [M]  crypto/crypto_engine.o
+  CC      arch/x86/kernel/pci-dma.o
+  CC      security/selinux/xfrm.o
+  CC      fs/stack.o
+  CC      arch/x86/mm/mem_encrypt.o
+  CC      block/blk-iocost.o
+  CC      mm/mincore.o
+  CC      security/apparmor/policy.o
+  CC [M]  arch/x86/platform/atom/punit_atom_debug.o
+  CC      security/tomoyo/realpath.o
+  CC      fs/fs_struct.o
+  CC      arch/x86/kernel/quirks.o
+  CC      arch/x86/mm/mem_encrypt_amd.o
+  CC [M]  crypto/echainiv.o
+  CC      security/selinux/netlabel.o
+  CC      arch/x86/platform/efi/memmap.o
+  CC      arch/x86/kernel/kdebugfs.o
+  CC      fs/statfs.o
+  CC [M]  crypto/hkdf.o
+  AS      arch/x86/mm/mem_encrypt_boot.o
+  AR      arch/x86/mm/built-in.a
+  CC      security/tomoyo/securityfs_if.o
+  CC      kernel/power/qos.o
+  CC      security/safesetid/lsm.o
+  CC      arch/x86/kernel/alternative.o
+  CC      arch/x86/platform/efi/quirks.o
+  CC [M]  crypto/ecdsa.o
+  CC      security/selinux/ibpkey.o
+  CC [M]  crypto/ecdsa-x962.o
+  CC      fs/fs_pin.o
+  CC      security/apparmor/policy_unpack.o
+  CC      security/safesetid/securityfs.o
+  CC      kernel/power/main.o
+  CC      security/tomoyo/tomoyo.o
+  CC      block/mq-deadline.o
+  CC      arch/x86/platform/efi/efi.o
+  CC [M]  crypto/ecdsa-p1363.o
+  CC      fs/nsfs.o
+  CC      security/selinux/ima.o
+  CC      arch/x86/kernel/i8253.o
+  AR      security/safesetid/built-in.a
+  CC      security/tomoyo/util.o
+  CC [M]  crypto/crypto_user.o
+  CC      mm/mlock.o
+  CC      kernel/power/console.o
+  CC      arch/x86/platform/efi/efi_64.o
+  CC      block/bio-integrity.o
+  CC      arch/x86/kernel/hw_breakpoint.o
+  CC      fs/fs_dirent.o
+  AR      security/selinux/built-in.a
+  CC      security/lockdown/lockdown.o
+  CC      fs/fs_context.o
+  CC      security/apparmor/procattr.o
+  CC      kernel/power/process.o
+  CC [M]  crypto/cmac.o
+  AR      security/tomoyo/built-in.a
+  CC      arch/x86/net/bpf_jit_comp.o
+  AS      arch/x86/platform/efi/efi_stub_64.o
+  CC      arch/x86/platform/efi/runtime-map.o
+  AR      security/lockdown/built-in.a
+  CC      mm/mmap.o
+  CC      block/blk-integrity.o
+  CC      arch/x86/kernel/tsc.o
+  CC      kernel/power/suspend.o
+  CC [M]  crypto/xcbc.o
+  CC      fs/fs_parser.o
+  CC      security/apparmor/lsm.o
+  AR      arch/x86/platform/efi/built-in.a
+  CC      arch/x86/platform/intel/iosf_mbi.o
+  CC      kernel/printk/printk.o
+  CC [M]  crypto/md4.o
+  CC      block/t10-pi.o
+  CC      fs/fsopen.o
+  CC      kernel/power/hibernate.o
+  AR      arch/x86/platform/intel/built-in.a
+  CC      arch/x86/kernel/tsc_msr.o
+  CC [M]  crypto/rmd160.o
+  CC      arch/x86/platform/uv/bios_uv.o
+  CC      kernel/printk/printk_safe.o
+  CC      block/bio-integrity-auto.o
+  CC      mm/mmu_gather.o
+  CC      arch/x86/kernel/io_delay.o
+  CC      fs/init.o
+  CC [M]  crypto/sm3_generic.o
+  CC      arch/x86/purgatory/purgatory.o
+  CC      arch/x86/purgatory/sha256.o
+  CC      arch/x86/platform/uv/uv_irq.o
+  CC      arch/x86/kernel/rtc.o
+  CC      kernel/power/snapshot.o
+  CC      block/blk-zoned.o
+  LD      arch/x86/purgatory/purgatory.ro
+  LD      arch/x86/purgatory/purgatory.chk
+  AS      arch/x86/purgatory/kexec-purgatory.o
+  CC [M]  crypto/streebog_generic.o
+  CC      fs/kernel_read_file.o
+  AR      arch/x86/purgatory/built-in.a
+  CC      mm/mprotect.o
+  CC      security/device_cgroup.o
+  AS      arch/x86/net/bpf_timed_may_goto.o
+  AR      arch/x86/net/built-in.a
+  CC      kernel/irq/irqdesc.o
+  CC      arch/x86/platform/uv/uv_time.o
+  CC      arch/x86/kernel/resource.o
+  CC      kernel/printk/nbcon.o
+  CC      security/apparmor/resource.o
+  CC      arch/x86/kernel/static_call.o
+  CC [M]  crypto/wp512.o
+  CC      fs/mnt_idmapping.o
+make[3]: *** [scripts/Makefile.build:546: kernel/sched] Error 2
+make[3]: *** Waiting for unfinished jobs....
+  CC      kernel/power/swap.o
+  CC      arch/x86/platform/uv/uv_nmi.o
+  CC      arch/x86/kernel/process.o
+  CC      kernel/irq/handle.o
+  CC      arch/x86/virt/svm/sev.o
+  CC [M]  crypto/blake2b.o
+  CC      fs/remap_range.o
+  CC      arch/x86/virt/vmx/tdx/tdx.o
+  CC      kernel/printk/printk_ringbuffer.o
+  CC      block/blk-wbt.o
+arch/x86/kernel/process.c:117:6: error: redefinition of ‘intel_itd_clear_history’
+  117 | void intel_itd_clear_history(void) {
+      |      ^~~~~~~~~~~~~~~~~~~~~~~
+In file included from ./include/linux/topology.h:37,
+                 from ./include/linux/gfp.h:8,
+                 from ./include/linux/mm.h:8,
+                 from arch/x86/kernel/process.c:6:
+./arch/x86/include/asm/topology.h:79:20: note: previous definition of ‘intel_itd_clear_history’ with type ‘void(void)’
+   79 | static inline void intel_itd_clear_history(void) { }
+      |                    ^~~~~~~~~~~~~~~~~~~~~~~
+In file included from ./arch/x86/include/asm/thread_info.h:59,
+                 from ./include/linux/thread_info.h:62,
+                 from ./include/linux/spinlock.h:60,
+                 from ./include/linux/mmzone.h:8,
+                 from ./include/linux/gfp.h:7:
+arch/x86/kernel/process.c: In function ‘__switch_to_xtra’:
+./arch/x86/include/asm/cpufeatures.h:21:42: error: ‘XX’ undeclared (first use in this function)
+   21 | #define X86_FEATURE_HRESET              (XX*32+22)
+      |                                          ^~
+./arch/x86/include/asm/cpufeature.h:72:31: note: in definition of macro ‘cpu_feature_enabled’
+   72 |         (__builtin_constant_p(bit) && DISABLED_MASK_BIT_SET(bit) ? 0 : static_cpu_has(bit))
+      |                               ^~~
+arch/x86/kernel/process.c:729:33: note: in expansion of macro ‘X86_FEATURE_HRESET’
+  729 |         if (cpu_feature_enabled(X86_FEATURE_HRESET))
+      |                                 ^~~~~~~~~~~~~~~~~~
+./arch/x86/include/asm/cpufeatures.h:21:42: note: each undeclared identifier is reported only once for each function it appears in
+   21 | #define X86_FEATURE_HRESET              (XX*32+22)
+      |                                          ^~
+./arch/x86/include/asm/cpufeature.h:72:31: note: in definition of macro ‘cpu_feature_enabled’
+   72 |         (__builtin_constant_p(bit) && DISABLED_MASK_BIT_SET(bit) ? 0 : static_cpu_has(bit))
+      |                               ^~~
+arch/x86/kernel/process.c:729:33: note: in expansion of macro ‘X86_FEATURE_HRESET’
+  729 |         if (cpu_feature_enabled(X86_FEATURE_HRESET))
+      |                                 ^~~~~~~~~~~~~~~~~~
+make[4]: *** [scripts/Makefile.build:289: arch/x86/kernel/process.o] Error 1
+make[3]: *** [scripts/Makefile.build:546: arch/x86/kernel] Error 2
+make[3]: *** Waiting for unfinished jobs....
+  CC      mm/mremap.o
+  CC      kernel/irq/manage.o
+  CC      security/apparmor/secid.o
+  CC [M]  crypto/pcbc.o
+  CC      security/bpf/hooks.o
+  CC      arch/x86/virt/svm/cmdline.o
+  AR      arch/x86/platform/uv/built-in.a
+  AR      arch/x86/platform/built-in.a
+  CC      kernel/power/user.o
+  CC      fs/pidfs.o
+  AR      arch/x86/virt/svm/built-in.a
+  CC      kernel/irq/spurious.o
+  CC [M]  crypto/lrw.o
+  CC      kernel/printk/sysctl.o
+  CC      security/apparmor/file.o
+  AR      security/bpf/built-in.a
+  CC      mm/msync.o
+  AR      kernel/printk/built-in.a
+  CC      block/blk-mq-debugfs.o
+  CC      kernel/power/wakelock.o
+  CC [M]  crypto/xctr.o
+  CC      mm/page_vma_mapped.o
+  CC      fs/file_attr.o
+  AR      arch/x86/virt/vmx/tdx/built-in.a
+  AR      arch/x86/virt/vmx/built-in.a
+  AR      arch/x86/virt/built-in.a
+make[2]: *** [scripts/Makefile.build:546: arch/x86] Error 2
+  CC [M]  crypto/hctr2.o
+  CC      security/landlock/setup.o
