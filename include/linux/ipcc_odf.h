@@ -71,6 +71,18 @@ static inline bool ipcc_odf_forking(void)
 	return current->ipcc_odf_fork;
 }
 
+/*
+ * Set by shadow_copy_process() around copy_mm(), so dup_mmap() (mm/mmap.c)
+ * knows to skip the page-table copy for a shadow's own writable-shared vmas -
+ * ipcc_odf_populate() rebuilds their contents lazily on the shadow's own
+ * fault instead. current only: this is always set on the *target*, which is
+ * current for the duration of shadow_copy_process(), never on the child.
+ */
+static inline void ipcc_odf_set_forking(bool forking)
+{
+	current->ipcc_odf_fork = forking;
+}
+
 static inline bool ipcc_odf_wants_log(struct mm_struct *mm)
 {
 	return ipcc_odf_active() && ipcc_mm_has_shadows(mm);
@@ -94,6 +106,7 @@ static inline void ipcc_odf_wrprotect_target(struct mm_struct *mm) { }
 static inline void ipcc_odf_log(struct mm_struct *target_mm,
 				unsigned long addr, struct folio *folio) { }
 static inline bool ipcc_odf_forking(void) { return false; }
+static inline void ipcc_odf_set_forking(bool forking) { }
 static inline bool ipcc_odf_wants_log(struct mm_struct *mm) { return false; }
 static inline bool ipcc_odf_wants_populate(struct vm_area_struct *vma)
 {

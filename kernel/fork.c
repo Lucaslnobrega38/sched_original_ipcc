@@ -2857,9 +2857,9 @@ static __latent_entropy struct task_struct *shadow_copy_process(
 	retval = copy_signal(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_sighand;
-	current->ipcc_odf_fork = ipcc_odf_active() && current->mm;
+	ipcc_odf_set_forking(ipcc_odf_active() && current->mm);
 	retval = copy_mm(clone_flags, p);
-	current->ipcc_odf_fork = 0;
+	ipcc_odf_set_forking(false);
 	if (retval)
 		goto bad_fork_cleanup_signal;
 	if (p->mm) {

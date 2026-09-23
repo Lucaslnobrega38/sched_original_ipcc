@@ -13,7 +13,13 @@ sudo make install
 # refeito manualmente. Descobre a versao do nvidia instalada via dkms em
 # vez de fixar, e usa a kernelrelease exata que acabou de ser buildada
 # (nao uname -r, que so muda depois do reboot).
-KVER=$(make -s kernelrelease)
+#
+# Le include/config/kernel.release (gravado pelo build) e NAO recalcula com
+# `make kernelrelease`: o sufixo "+" vem de scripts/setlocalversion e depende
+# da arvore estar suja NO MOMENTO em que e avaliado. Recalcular aqui deu
+# "7.0.0-rc1+" para um kernel que foi buildado e instalado como "7.0.0-rc1",
+# e o dkms construiu o nvidia para a release errada.
+KVER=$(cat include/config/kernel.release)
 NVIDIA_VER=$(dkms status 2>/dev/null | grep -oP 'nvidia/\K[0-9.]+' | head -1)
 
 if [ -z "$NVIDIA_VER" ]; then

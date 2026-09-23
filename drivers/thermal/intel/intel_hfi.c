@@ -206,6 +206,13 @@ static seqcount_t hfi_ipcc_seqcount = SEQCNT_ZERO(hfi_ipcc_seqcount);
 static int __percpu *hfi_ipcc_baseline;
 static bool hfi_ipcc_baseline_set;
 
+/* Static scores, not the hardware's; index = HFI class (ipcc - 1). See context.md 4.3. */
+static const int hfi_ipcc_static_pcore[] = { 80, 100, 100, 40 };
+static const int hfi_ipcc_static_ecore[] = { 100, 80, 80, 40 };
+
+/* CPUs whose static scores are already in place. */
+static struct cpumask hfi_ipcc_static_done;
+
 static int alloc_hfi_ipcc_scores(void)
 {
 	if (!cpu_feature_enabled(X86_FEATURE_ITD))
@@ -292,6 +299,12 @@ static void set_hfi_ipcc_scores(struct hfi_instance *hfi_instance)
 	if (!cpu_feature_enabled(X86_FEATURE_ITD))
 		return;
 
+	BUILD_BUG_ON(ARRAY_SIZE(hfi_ipcc_static_pcore) != ARRAY_SIZE(hfi_ipcc_static_ecore));
+
+	/* Static table: nothing to redo once every cpu of this instance has its entry. */
+	if (cpumask_subset(hfi_instance->cpus, &hfi_ipcc_static_done))
+		return;
+
 	/*
 	 * Serialize with writes to the HFI table. It also protects the write
 	 * loop against seqcount readers running in interrupt context.
@@ -304,12 +317,18 @@ static void set_hfi_ipcc_scores(struct hfi_instance *hfi_instance)
 	 */
 	write_seqcount_begin(&hfi_ipcc_seqcount);
 	for_each_cpu(cpu, hfi_instance->cpus) {
+		const int *tbl;
 		unsigned int sum = 0;
 		int c, *scores;
 		s16 index;
 
+		if (cpumask_test_cpu(cpu, &hfi_ipcc_static_done))
+			continue;
+
 		index = per_cpu(hfi_cpu_info, cpu).index;
 		scores = per_cpu_ptr(hfi_ipcc_scores, cpu);
+		tbl = (cpu_data(cpu).topo.cpu_type >> 24) == INTEL_CPU_TYPE_ATOM ?
+		      hfi_ipcc_static_ecore : hfi_ipcc_static_pcore;
 
 		for (c = 0;  c < hfi_features.nr_classes; c++) {
 			struct hfi_cpu_data *caps;
@@ -317,11 +336,14 @@ static void set_hfi_ipcc_scores(struct hfi_instance *hfi_instance)
 			caps = hfi_instance->data +
 			       index * hfi_features.cpu_stride +
 			       c * hfi_features.class_stride;
-			scores[c] = caps->perf_cap;
-			sum += caps->perf_cap;
+			/* Classes past the static table keep the hardware value. */
+			scores[c] = c < ARRAY_SIZE(hfi_ipcc_static_pcore) ?
+				    tbl[c] : caps->perf_cap;
+			sum += scores[c];
 
-			pr_info("IPCC SCORE: cpu=%d classe=%d perf_cap=%u ee_cap=%u score=%d\n",
-				cpu, c, caps->perf_cap, caps->ee_cap, scores[c]);
+			if (!hfi_ipcc_baseline_set)
+				pr_info("IPCC SCORE: cpu=%d classe=%d perf_cap=%u ee_cap=%u score=%d\n",
+					cpu, c, caps->perf_cap, caps->ee_cap, scores[c]);
 		}
 
 		*per_cpu_ptr(hfi_ipcc_baseline, cpu) = sum / hfi_features.nr_classes;
@@ -329,6 +351,8 @@ static void set_hfi_ipcc_scores(struct hfi_instance *hfi_instance)
 		if (!hfi_ipcc_baseline_set)
 			pr_info("IPCC BASELINE: cpu=%d %d\n",
 				cpu, *per_cpu_ptr(hfi_ipcc_baseline, cpu));
+
+		cpumask_set_cpu(cpu, &hfi_ipcc_static_done);
 	}
 
 	hfi_ipcc_baseline_set = true;
