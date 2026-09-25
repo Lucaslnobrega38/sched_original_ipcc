@@ -118,7 +118,7 @@ Delta entre as duas razões: 0,76 (rand48 é 108% mais favorável ao P que div16
 
 **Contra o hardcode da seção 4.3:** a direção que dei bate com a vazão real — `div16` favorecido no E (80/100, ou seja E>P) e `rand48` favorecido no P (100/80, P>E) reproduzem o sinal de cada razão medida aqui, mesmo essa direção sendo *oposta* à da tabela ITD real do hardware para o `div16`. Em magnitude, porém, o hardcode (40 pontos de diferença entre as duas razões na escala HFI) é bem mais conservador que a diferença real medida (76 pontos de razão) — a tabela sintética discrimina menos entre as duas classes do que a vazão real sugere que poderia.
 
-**Ressalva:** um par de cores, uma amostra cada. Antes de tratar isso como caracterização confiável do silício, precisaria repetir em vários P-cores e E-cores, com múltiplas amostras.
+**Ressalva:** um par de cores, uma amostra cada. Antes de tratar isso como caracterização confiável do silício, precisaria repetir em vários P-cores e E-cores, com múltiplas amostras. Medido num Acer Predator Neo AI (275HX) com a potência limitada pelo hardware, que pode ter limitado a vazão (ver seção 10); as razões P/E valem para essa plataforma.
 
 ### 4.5 Custo do shadow na vazão pinada P/E (`pe_delta.sh`)
 
@@ -252,7 +252,7 @@ Notas: o atual perde 13% em `cls2_alone` (o shadow reserva um P-core, restam 7 p
 
 ### 5.7 Vazão `mixed` (desenho vigente)
 
-**Metodologia.** Único cenário de vazão: 8 cls2 (`rand48`) + 16 cls1 (`div16`) simultâneos (P = 8 fixo, 2×P = 16 = E-cores; 24 tasks), como dois `stress-ng --cpu N --metrics-brief` paralelos, 30s, 5 runs. Cada processo reporta o bogo-ops/s agregado de seus N workers; a vazão por worker é esse total dividido por N, reportada separadamente para cada tipo. Preflight: governor `performance`, turbo desligado, aquecimento de 5s. Com P = 8 fixo, o kernel com shadow tem 24 tasks em 23 cpus úteis (um P-core reservado) — o custo disso entra na medida.
+**Metodologia.** Único cenário de vazão: 8 cls2 (`rand48`) + 16 cls1 (`div16`) simultâneos (P = 8 fixo, 2×P = 16 = E-cores; 24 tasks), como dois `stress-ng --cpu N --metrics-brief` paralelos, 30s, 5 runs. Cada processo reporta o bogo-ops/s agregado de seus N workers; a vazão por worker é esse total dividido por N, reportada separadamente para cada tipo. Preflight: governor `performance`, turbo desligado, aquecimento de 5s. Plataforma: Acer Predator Neo AI (275HX) com a potência limitada pelo hardware, o que provavelmente limitou a vazão de cenários com todos os cores ocupados, como este (ver seção 10). Com P = 8 fixo, o kernel com shadow tem 24 tasks em 23 cpus úteis (um P-core reservado) — o custo disso entra na medida.
 
 **Kernel atual** (`static_hfi_80_100_swap5`, 7.0.0-rc1 #33, 5 runs, rodada de 2026-09-23):
 
@@ -332,6 +332,7 @@ Um `p->signal->rlim[RLIMIT_CORE].rlim_cur = 0` já existia antes como tentativa 
 
 ## 10. Notas operacionais
 
+- **Plataforma de medição:** todas as medidas deste documento (seções 4.3–4.5, 5.6, 5.7) foram feitas num Acer Predator Neo AI com Core Ultra 9 275HX (8 P-cores + 16 E-cores), com a potência (W) limitada pelo hardware/firmware do notebook. Isso provavelmente limitou a vazão em alguns cenários (carga com os 24 cores ocupados, como `contention` e `mixed`) e é compatível com as quedas de `perf_cap` da seção 4.3, cuja causa não foi determinada. **Não foi medido**: os valores dos limites de potência não foram lidos e não há contadores deles expostos no sysfs. Os deltas entre kernels (mesma máquina, mesmos limites) continuam comparáveis; os valores absolutos e as razões P/E não devem ser extrapolados para outro hardware.
 - Debugfs (`/sys/kernel/debug`) é montado 0700 root-only nesta máquina — precisa de `sudo` pra ler/escrever qualquer coisa sob `ipcc_stash`/`ipcc_classify`.
 - E-cores nesta máquina: cpu4-11 (8). P-cores: cpu0, cpu2 (cpu1/cpu3 são os SMT siblings, offline via `nosmt`).
 - `nosmt` (sem `=force`) preserva capacidade uniforme mas ainda tira os siblings SMT do escalonamento — suficiente pra manter a classificação precisa (`sched_smt_siblings_idle()` trata sibling offline como idle) sem desistir da capacidade real assimétrica.

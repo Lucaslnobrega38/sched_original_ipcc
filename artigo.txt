@@ -1,0 +1,391 @@
+% Revised LaTeX draft with conceptual framing first, implementation second, and explicit table references.
+
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{adjustbox}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{balance}
+\usepackage{bm}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{Challenges of IPC Class-Aware Scheduling on Raptor Lake Processors in the Linux Kernel\\{}
+\thanks{This work has been supported by the National Council for Scientific and Technological Development -- CNPq and by Petrobras under the cooperation agreement project No. 0050.0132311.25.9.}
+}
+
+\author{\IEEEauthorblockN{Lucas N\'{o}brega}
+\IEEEauthorblockA{\textit{Dep. de Sistemas de Computa\c{c}\~{a}o} \\
+\textit{Universidade Federal da Para\'{i}ba}\\
+Jo\~{a}o Pessoa, Brasil \\
+lucas.lima.nobrega@academico.ufpb.br}
+\and
+\IEEEauthorblockN{Tiago Nascimento}
+\IEEEauthorblockA{\textit{Dep. de Sistemas de Computa\c{c}\~{a}o} \\
+\textit{Universidade Federal da Para\'{i}ba}\\
+Jo\~{a}o Pessoa, Brasil \\
+tiagopn@ci.ufpb.br}
+\and
+\IEEEauthorblockN{Davi Santos}
+\IEEEauthorblockA{\textit{Dep. de Sistemas de Computa\c{c}\~{a}o} \\
+\textit{Universidade Federal da Para\'{i}ba}\\
+Jo\~{a}o Pessoa, Brasil \\
+davi@ci.ufpb.br}
+}
+
+% \title{Challenges of IPC Class-Aware Scheduling on Raptor Lake Processors in the Linux Kernel}
+
+% \author{Lucas N\'{o}brega\IEEEauthorrefmark{1}, Tiago Nascimento\IEEEauthorrefmark{1} and Davi Santos\IEEEauthorrefmark{1}%
+% \thanks{\IEEEauthorrefmark{1}All Authors are with Centro de Inform\'{a}tica, Departamento de Sistemas de Computa\c{c}\~{a}o, Universidade Federal da Para\'{i}ba, Jo\~{a}o Pessoa 58058-600, Brazil {\tt\small davi@ci.ufpb.br}}%
+% }
+
+\maketitle
+
+\begin{abstract}
+Hybrid Intel processors combine performance cores (P-cores) with efficient cores (E-cores), so the operating system scheduler must decide not only how much load each core receives, but also which threads benefit most from running on the faster cores. Recent Intel processors help with that second decision in hardware: while a thread runs, the processor observes its execution profile and reports a class summarizing how well that thread exploits a P-core. Intel proposed a way for the Linux scheduler to exploit these classes as a patch series for Linux 6.4-rc1, which was never merged into mainline; we refer to this design as IPC Class-Aware Scheduling (ICAS). This paper ports that series to Linux 7.0-rc1 and evaluates it on two Raptor Lake platforms---a Core i5-1334U (2 P-cores + 8 E-cores) and a Core i9-14900HX (8 P-cores + 16 E-cores)---comparing a scheduler that knows only core priority against one that also knows thread classes. We find that the classification is reliable while a thread runs alone on a P-core: classes separate cleanly, and the class the hardware favors is indeed the one that gains most from a P-core. It is largely unavailable, however, when the machine is busy. The kernel withholds a class while both hardware threads of a P-core are active, and E-cores never report a class at all, so a thread waiting on an E-core cannot be told apart from any other at the moment the scheduler chooses whom to promote. As a consequence, task placement, tail latency and throughput stay within run-to-run variability of the class-agnostic baseline on both platforms.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Intel Thread Director, IPC Classes, CFS, hybrid scheduling, Raptor Lake, asymmetric packing, Linux kernel
+\end{IEEEkeywords}
+
+% ============================================================================
+\section{Introduction}
+% ============================================================================
+
+The evolution of x86 processors toward hybrid architectures, commercially initiated by Intel with Alder Lake (12th generation, 2021) and continued with Raptor Lake (13th generation), introduced a challenge for operating system schedulers: how to allocate threads between high-performance cores (P-cores) and efficient cores (E-cores) according to workload characteristics rather than system load alone. The two core types also differ in a second way that matters throughout this paper: each P-core supports simultaneous multithreading (SMT, marketed by Intel as Hyper-Threading) and therefore exposes two hardware threads---\emph{siblings}---that share its execution resources, whereas each E-core exposes a single one. Linux currently answers only the simpler half of that question. Intel Turbo Boost Max Technology (ITMT) assigns each core a static priority reflecting how fast it is~\cite{intel2024intel}, and the Linux load balancer consumes that ordering through a policy known as \emph{asymmetric packing}: an idle high-priority core pulls a runnable thread away from a lower-priority one, so P-cores fill up first. The policy is deliberately blind to what the threads actually do---any runnable thread will serve---so once the P-cores are occupied, nothing revisits whether the threads sitting on them are the ones that profit most from being there.
+
+Intel Thread Director (ITD) supplies the missing half~\cite{neri2022thermal}. While a thread executes, the processor accumulates microarchitectural counters and reports a \emph{class} describing its execution profile; a hardware-maintained table, the Hardware Feedback Interface (HFI), then states, for each class and each CPU, how much performance and energy efficiency that class obtains there. Raptor Lake defines four classes~\cite{intel2024intel}: non-vectorized integer or floating-point code; vectorized code; code dominated by Deep Learning Boost (DL Boost) matrix instructions, used in AI inference; and code dominated by the \texttt{pause} instruction, that is, threads spinning while waiting on a lock. Only the first two occur in ordinary CPU-bound programs; the other two are narrow special cases. Because the hardware table scores the classes differently on P-cores, a scheduler can use a thread's class as a tiebreaker: among threads the load balancer considers equally eligible, promote the one whose class gains most from a P-core. We call this design \textbf{IPC Class-Aware Scheduling} (ICAS), since the classes group instructions by the rate of instructions per cycle (IPC) they sustain~\cite{ipcc}; following the kernel patches, we write IPCC for the IPC class of a thread. Intel documents what the four classes are meant to represent, but not the heuristics, thresholds or transition rules that assign them~\cite{bilbao2023bilbaoflexible}.
+
+ICAS is not hypothetical: Intel submitted it to the Linux kernel community in 2022--2023 as a patch series that reached its fourth revision~\cite{ipcc}. It was nevertheless never merged, and the mailing-list record contains no rejection or objection explaining why---the reasons are simply not public. The mechanism thus remains the only proposal to date for exploiting Thread Director classes inside the mainline Linux scheduler, and what it is actually worth has never been reported.
+
+What has been reported concerns the hardware signal rather than the scheduler. Saez and Prieto-Matias~\cite{saez2022evaluation} asked whether ITD classes yield an accurate numerical prediction of a thread's \emph{speedup factor}---its P-core over E-core performance ratio---on Alder Lake, found that they do not (mean absolute error of 0.38 and correlation below 0.1 across SPEC CPU), and turned to machine-learning models built on performance counters instead. The accuracy of that predicted ratio, however, is not what a load balancer consumes. ICAS never uses the magnitude of a score: it only asks which of two candidate threads should get the P-core. A signal too imprecise to predict a speedup factor may still \emph{rank} threads well enough to place them, and any resulting gain---in throughput, and through better placement in performance per watt---would come essentially for free, since the hardware produces the classification at no instrumentation cost. Smejkal et al.~\cite{smejkal2025harp} do observe that the ITD patch series performs within the margin of error of unmodified CFS, but treat that as a baseline measurement and do not investigate its cause. What is missing is therefore an evaluation of ICAS \emph{as a scheduling policy}: whether it changes where threads run, whether that translates into throughput, and---if it does not---which part of the mechanism is responsible.
+
+There is reason to expect an effect. Our characterization (Section~\ref{sec:approach}) shows that the two general-purpose classes do differ in P-core affinity: the correlation is weak, but it exists and points in the direction the hardware scores predict. And the mechanism does not need a strong correlation in order to act, because its decisions are relative rather than absolute. The class with the higher P-core score does not win a guaranteed amount of extra performance; it wins the argument over who gets the core. Threads of the favored class should therefore accumulate residency on P-cores and displace the others onto the remaining capacity---leftover P-core hardware threads and E-cores---even when each individual thread's gain is modest.
+
+This motivates three research questions, which structure the evaluation that follows:
+
+\begin{itemize}
+    \item \textbf{RQ1:} Do the hardware-reported classes characterize P-core affinity reliably enough to drive scheduling---are they stable over time, and does the class the hardware favors really gain more from a P-core?
+    \item \textbf{RQ2:} Does adding class information on top of ITMT change task placement, and does it improve throughput?
+    \item \textbf{RQ3:} Does reading and filtering the class on every scheduler tick add measurable scheduling latency?
+\end{itemize}
+
+We address these questions on two Raptor Lake platforms with contrasting topologies---an Intel Core i5-1334U (2P+8E) and an Intel Core i9-14900HX (8P+16E)---making three contributions.\footnote{The experimental profiler and the kernel source code are publicly available at \url{https://github.com/Lucaslnobrega38/sched-bench} and \url{https://github.com/Lucaslnobrega38/sched_original_ipcc}.} First, an empirical characterization of the two general-purpose classes on Raptor Lake, covering how stable the classification is over time and each class's \emph{performance delta}---by which we mean how much more throughput a workload of that class obtains on a P-core than on an E-core, i.e.\ the P/E throughput ratio. Second, an evaluation of ICAS as a scheduling policy, in terms of placement, wakeup latency and throughput, comparing ITMT alone against ITMT plus classes on both platforms. Third, a port of Intel's patch series to Linux 7.0-rc1, together with an analysis of three structural properties of that implementation which keep the class signal from reaching the load balancer at the moment it is needed.
+
+% ============================================================================
+\section{Related Work}\label{sec:related}
+
+Scheduling in heterogeneous architectures has been widely studied, both for ARM big.LITTLE~\cite{butko2016full}~\cite{smejkal2024mapper} and for Intel hybrid generations. On x86 platforms, Linux typically handles heterogeneity by combining core-priority information (ITMT on Intel, CPPC on AMD~\cite{amd_sdm_2024}) with the scheduler's load balancer, without an explicit energy model. The resulting asymmetric packing policy biases placement toward stronger cores and indirectly favors energy-efficient execution via a race-to-idle effect. Lozi et al.~\cite{lozi2016linux} show, however, that the CFS load balancer can produce inefficient utilization patterns, motivating additional heuristics for asymmetric topologies. Energy Aware Scheduling (EAS)~\cite{chen2022energy} is the Linux approach for energy-efficient placement on heterogeneous systems, using explicit per-domain energy models; it is conceptually different from ITMT-based scheduling, which operates on core priority rather than virtual capacity.
+
+Several academic proposals address task classification via software. Saez et al.~\cite{saez2017pmctrack} use hardware performance counters to estimate per-thread speedup across core types, feeding a user-space scheduler. Chen and Marculescu~\cite{chen2017task} formulate heterogeneous scheduling as a queueing-theory optimization problem. More recently, Smejkal et al.~\cite{smejkal2025harp} proposed HARP, which combines online application monitoring with bidirectional scheduler communication; evaluated on an i9-13900K with ITD support, HARP achieved a 12\% gain in computational speed and 28\% higher energy efficiency relative to EAS. The same evaluation reports that Intel's ITD patch series performs within the margin of error of unmodified CFS---an outcome consistent with ours, although HARP does not investigate what causes it.
+
+Saez and Prieto-Matias~\cite{saez2022evaluation} evaluate ITD on Alder Lake from the complementary angle of signal accuracy, comparing the speedup factor implied by the reported class against the one measured with performance counters, and find a mean absolute error of 0.38 and a correlation below 0.1 over SPEC CPU2006/2017. Two of their observations bear directly on this work. First, on their Alder Lake part the class register never returns a valid value on E-cores, for any benchmark tested---the same blind spot we measure on Raptor Lake in Section~\ref{sec:approach}, reached by different means. Second, in order to build a scheduler on top of ITD at all, they had to add a per-thread history table that replays classes previously observed on a big core, which is an explicit workaround for that blind spot. Their focus, however, remains the fidelity of the signal in isolation: how an in-kernel policy built on it behaves, and why it fails to behave better, is not addressed.
+
+These observations point to a trade-off: hardware classification (ITD) operates with very low latency and no instrumentation overhead but offers limited control, whereas software-based approaches provide flexibility and robustness at higher overhead. The approach studied here sits between these extremes, leveraging hardware-provided classification while integrating it explicitly into the scheduler.
+
+\section{ICAS: IPC Class-Aware Scheduling}\label{sec:background_ipc}
+
+Before entering the implementation, Fig.~\ref{fig:flow} summarizes the path the class signal travels, from the hardware that produces it to the scheduling decision that consumes it. While a thread runs on a P-core, the processor updates its internal counters and exposes the resulting class in a \emph{model-specific register} (MSR), a per-CPU hardware register the kernel reads with a single instruction. On every scheduler tick the kernel reads that register for the thread currently running, and applies two filters before believing what it reads: a reading taken while the other hardware thread of the same core is busy is discarded, and a reading must repeat four times in a row before it replaces the class stored in the thread's descriptor. Later, when an idle P-core looks for work to pull, it turns each candidate's stored class into a score by looking that class up in the hardware table for the destination CPU, and pulls from the queue holding the highest-scoring candidate. Three points along this path can silently yield no information at all: E-cores never report a class, readings taken under contention are rejected, and the repetition requirement restarts whenever two consecutive readings disagree.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  font=\scriptsize,
+  node distance=2.6mm,
+  box/.style   ={draw, rounded corners=2pt, align=center, inner sep=3pt,
+                 text width=44mm, minimum height=4.8mm},
+  hw/.style    ={box, fill=black!8},
+  kern/.style  ={box, fill=white},
+  sched/.style ={box, fill=black!4},
+  side/.style  ={draw, dashed, rounded corners=2pt, align=center,
+                 inner sep=2pt, text width=17mm, font=\tiny},
+  ar/.style    ={-{Latex[length=1.6mm]}, semithick},
+  dr/.style    ={dashed, thin, gray}
+]
+\node[hw]                 (run)  {thread runs on a CPU};
+\node[hw,    below=of run]  (td)   {Thread Director counters\\(per physical P-core)};
+\node[hw,    below=of td]   (msr)  {class id exposed in a per-CPU register (MSR)};
+\node[kern,  below=of msr]  (read) {scheduler tick: read the register};
+\node[kern,  below=of read] (filt) {accuracy filter:\\is the SMT sibling idle?};
+\node[kern,  below=of filt] (deb)  {debounce:\\4 identical readings in a row};
+\node[kern,  below=of deb]  (task) {confirmed class stored in \texttt{task\_struct}};
+\node[sched, below=of task] (lb)   {idle P-core balances load:\\score each candidate via the hardware table};
+\node[sched, below=of lb]   (mig)  {pull the highest-scoring thread};
+
+\foreach \a/\b in {run/td, td/msr, msr/read, read/filt, filt/deb, deb/task, task/lb, lb/mig}
+  \draw[ar] (\a) -- (\b);
+
+\node[side, right=2.5mm of td]   (nec)  {E-cores report no class};
+\node[side, right=2.5mm of filt] (nsmt) {rejected while the sibling runs};
+\node[side, right=2.5mm of deb]  (ndeb) {reset on any disagreement};
+\draw[dr] (td)   -- (nec);
+\draw[dr] (filt) -- (nsmt);
+\draw[dr] (deb)  -- (ndeb);
+
+\node[fit=(run)(msr),  inner sep=0pt, draw=none] (bhw) {};
+\node[fit=(read)(task),inner sep=0pt, draw=none] (bkn) {};
+\node[fit=(lb)(mig),   inner sep=0pt, draw=none] (bsc) {};
+\node[rotate=90, font=\tiny\bfseries, left=1mm of bhw] {hardware};
+\node[rotate=90, font=\tiny\bfseries, left=1mm of bkn] {kernel, per tick};
+\node[rotate=90, font=\tiny\bfseries, left=1mm of bsc] {balancer};
+\end{tikzpicture}
+\caption{Path of the class signal, from the hardware that produces it to the scheduling decision that consumes it. The dashed annotations mark the three points at which the signal can go missing, analysed in Section~\ref{sec:background_ipc}-B and measured in Sections~\ref{sec:approach} and~\ref{sec:experiments}.}
+\label{fig:flow}
+\end{figure}
+
+In this section we describe the most recent ICAS proposal submitted by Intel to the Linux kernel community in 2022--2023~\cite{ipcc}. The patch series, which reached v4 with 24 patches, connects ITD/HFI feedback to the Linux scheduler so that IPCC can be used as a tiebreaker in hybrid load balancing. The hardware class identifier, which ranges from 0 to 3, is read from the register described above and stabilized through a debounce filter that only confirms the class after four consecutive identical readings across scheduler ticks. A model-specific accuracy filter restricts classification on Alder/Raptor Lake: hardware classes~0 and~1 are only accepted when the SMT sibling is idle, while classes~2 and~3 are always considered accurate. The confirmed IPCC is consumed by the load balancer as a tiebreaker between competing migration candidates. Our implementation of this proposal in Linux 7.0-rc1 touches seven kernel source files across the scheduler core, the CFS fair class, task metadata, scheduler topology, and the Intel HFI/ITD thermal driver.
+
+\subsection{Implementation Details}
+
+The mechanism can be decomposed into five parts, corresponding to groups of patches in the v4 series.
+
+\begin{enumerate}
+    \item \textbf{Task-level metadata (patches 1, 3):} Each \texttt{task\_struct} carries three fields: \texttt{ipcc} (confirmed class, 0~=~unclassified), \texttt{ipcc\_tmp} (last candidate from the MSR), and \texttt{ipcc\_cntr} (debounce counter). Fields are zero-initialized in \texttt{\_\_sched\_fork}.
+
+    \item \textbf{MSR reading and debounce (patches 13, 21):} On each scheduler tick, \texttt{arch\_update\_ipcc()} calls \texttt{intel\_hfi\_read\_classid()} to obtain the raw hardware class from \texttt{MSR\_IA32\_HW\_FEEDBACK\_CHAR}. A model-specific filter (\texttt{classification\_is\_accurate()}) rejects classes~0 and~1 when the SMT sibling is busy on Alder/Raptor Lake. Accepted readings pass through \texttt{debounce\_and\_update\_class()}, which only commits a new class after four consecutive identical readings. Hardware classids start at~0; scheduler IPCC start at~1 (\texttt{ipcc~=~classid~+~1}), so \texttt{ipcc~=~0} remains the ``unclassified'' sentinel~(see Table~\ref{tab:classes}). Because the IPCC scoring functions index into the hardware priority array using \texttt{ipcc~-~1}, the implementation forces any task with \texttt{ipcc~=~0} to \texttt{ipcc~=~1} (hardware class~0) on its first scheduler tick, before any hardware reading has occurred, to prevent out-of-bounds access.
+
+    \item \textbf{Architecture-specific scoring (patches 14, 15):} \texttt{arch\_get\_ipcc\_score(ipcc, cpu)} returns the priority value from the HFI table for the given CPU. The values are stored in a per-CPU array populated whenever the HFI table is updated, and read under a seqcount to avoid locking.
+
+    \item \textbf{Load balancer integration (patches 6--10):} IPCC scores are used exclusively as a tiebreaker inside the existing CFS load balancer. During idle load balancing with \texttt{SD\_ASYM\_PACKING}, the functions \texttt{sched\_asym\_ipcc\_pick()} and \texttt{sched\_asym\_ipcc\_prefer()} compare groups that have equal priority, and \texttt{ipcc\_score\_delta()} selects the busiest runqueue whose last enqueued task would benefit most from migration to the destination CPU. This is a \emph{pull-based} mechanism: it is the idle P-core that selects which runqueue to pull from, comparing the maximum IPCC scores of candidate source runqueues and pulling from the one with the highest-scoring task.
+
+    \item \textbf{SMT-aware classification (patches 20, 21):} \texttt{sched\_smt\_siblings\_idle()} checks whether all SMT siblings of a CPU are idle, and the result gates the accuracy filter described above. Classifications generated while the sibling is busy are discarded rather than propagated, so the stored class is only ever updated in SMT-idle windows.
+\end{enumerate}
+
+\subsection{Implementation Analysis}
+
+The implementation choices described above have three structural consequences whose practical impact will be empirically evaluated in Section~\ref{sec:experiments}. First, since E-cores do not expose ITD classification, any task that has only ever run on E-cores remains permanently at the default class~1, creating a blind spot that the tiebreaker cannot resolve. Second, this blind spot combines with the pull-based design to produce a circular dependency: a task must first reach a P-core to be classified, but the tiebreaker that should promote it cannot distinguish it from other unclassified tasks while it remains on an E-core---a condition especially pronounced on processors with few P-cores. Third, the accuracy filter (which rejects classes~0 and~1 under SMT contention) and the debounce filter (which requires four consecutive identical readings) interact destructively: under sustained load, accepted classification windows become sporadic and frequently insufficient to satisfy the debounce threshold, leaving tasks unclassified for non-deterministic periods.
+
+Taken together, these three properties depart from the conceptual approach in a way that is not immediately visible in the patch series description. The approach assumes class information is available for the candidate tasks a load-balancing decision has to choose between; the implementation produces it only for tasks that (i) have already run on a P-core, (ii) did so in a recent window free of SMT contention, and (iii) ran there long enough to accumulate four consecutive identical readings. Section~\ref{sec:experiments} measures what this costs in placement, latency and throughput.
+
+% ============================================================================
+\section{IPC Classes Experimental Evaluation}\label{sec:approach}
+% ============================================================================
+
+This section answers RQ1: whether the classes the hardware reports are stable enough, and separate P-core affinity sharply enough, to be worth acting on. Intel documents what each of the four classes is meant to represent, but not the heuristics, thresholds or transition rules behind the assignment, so both properties have to be established experimentally. Table~\ref{tab:classes} recalls the mapping between the identifiers the hardware reports (0--3) and the values the scheduler stores (\texttt{ipcc}~1--4), where \texttt{ipcc}~=~0 is reserved as the ``unclassified'' sentinel.
+
+We restrict the characterization to the two general-purpose classes---non-vectorized code (\texttt{ipcc}~1) and vectorized code (\texttt{ipcc}~2)---which between them cover ordinary application logic, integer processing and branching on one side, and loops, array processing and auto-vectorized media routines on the other. The remaining two are narrow: DL Boost code (\texttt{ipcc}~3) appears in AI inference workloads, and \texttt{pause}-dominated code (\texttt{ipcc}~4) is a synchronization pattern rather than compute. Neither is representative of the CPU-bound threads a general-purpose scheduler places day to day, and, as reported below, neither appeared in any of our measurements.
+
+Experiments were conducted on a Dell Inspiron 15 3530 laptop with an Intel Core i5-1334U (Raptor Lake-U), which contains 2 P-cores with Hyper-Threading (4 logical threads, CPUs 0--3) and 8 E-cores (CPUs 4--11). The operating system is EndeavourOS (Arch Linux base) and Hyper-Threading remained active in all tests, as it represents the default configuration. The same kernel builds and scheduling benchmarks were additionally executed on an Intel Core i9-14900HX (8 P-cores + 16 E-cores, Raptor Lake-HX) to assess whether a higher P-core count and a less restrictive P:E ratio would alter the trends; the IPCC characterization itself (subsections below) was conducted only on the i5-1334U.
+
+\subsection{IPCC Behavior Assessment}
+
+Before evaluating the ICAS behavior, we first characterized the hardware classification itself. We executed 82 distinct \texttt{stress-ng} CPU methods (\texttt{--cpu 1 --cpu-method <method>}), pinned to P-core 0 via \texttt{taskset} with the SMT sibling idle, and recorded the resulting classifications through continuous \texttt{trace\_printk} instrumentation in \texttt{arch\_update\_ipcc()} (approximately 1000 samples/s over 5 seconds, filtered by worker PID). Of the 82 methods, every single one was classified as either \texttt{ipcc}~1 or \texttt{ipcc}~2; none triggered DL Boost or spin-wait dominated classes, which is expected since \texttt{stress-ng} CPU methods are ordinary compute kernels. Table~\ref{tab:classes} summarizes the documented semantics together with our empirical observation for the two general-purpose classes.
+
+\begin{table}[ht]
+\centering
+\caption{IPCC Semantics (Intel-documented~\cite{intel2024intel}) and Empirical Observation on i5-1334U}
+\label{tab:classes}
+\begin{tabular}{cclp{3.1cm}}
+\toprule
+\textbf{HW class} & \textbf{ipcc} & \textbf{Documented semantics} & \textbf{Empirical observation} \\
+\midrule
+--- & 0 & --- & Unclassified (E-core or short-lived) \\
+0 & 1 & Non-vectorized integer/FP code & FP scalar, integer, branches, recursion \\
+1 & 2 & Vectorized code, excl. DL Boost & Tight loops, array scans, auto-vectorized \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Stability of IPCC 1 and 2}
+
+Both classes~1 and 2 are stable under controlled conditions (SMT sibling idle, single task on P-core). Table~\ref{tab:stability} shows the number of class transitions observed over 5 seconds ($\sim$5200 samples) for representative workloads.
+
+\begin{table}[ht]
+\centering
+\caption{Classification Stability (5\,s, $\sim$5200 samples, P-core 0, sibling idle)}
+\label{tab:stability}
+\begin{tabular}{lrrrl}
+\toprule
+\textbf{Method} & \textbf{cls1\%} & \textbf{cls2\%} & \textbf{Trans.} & \textbf{Behavior} \\
+\midrule
+\texttt{div16}      & 100.0 &   0.0 &     4 & Ultra-stable (cls1) \\
+\texttt{matrixprod}  & 100.0 &   0.0 &     6 & Ultra-stable (cls1) \\
+\texttt{rand48}      &   4.5 &  95.5 &   250 & Stable (cls2) \\
+\texttt{fft}         &   5.2 &  94.8 &   271 & Stable (cls2) \\
+\texttt{collatz}     &   4.2 &  95.8 &   315 & Moderate (cls2) \\
+\texttt{cfloat}      &   7.8 &  92.2 &   395 & Less stable (cls2) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Class~1 is orders of magnitude more stable than class~2: workloads classified as class~1 exhibit 4--6 transitions in 5 seconds, while class~2 workloads oscillate between 250--400 transitions in the same period, briefly regressing to class~1 before returning. Despite these oscillations, class~2 methods such as \texttt{rand48} spend over 95\% of time in their dominant class, which means the debounce filter successfully stabilizes the classification for sustained workloads.
+
+An important finding is that 40 of the 82 tested methods received class~1 (all with 0\% class~2 samples), and another 42 received class~2 (with 86--99\% class~2 samples). The classification is thus binary in practice: class~1 encompasses scalar floating-point, transcendental functions, deep recursion, and heavy branching, while class~2 encompasses tight loops with low branching and sequential array access.
+
+\subsubsection{Performance Affinity Across Core Types}
+
+To quantify the relationship between IPCC and core types, we measured the throughput (bogo-ops/s) of representative workloads on isolated P-cores and E-cores. Table~\ref{tab:pe_affinity} summarizes the results.
+
+\begin{table}[ht]
+\centering
+\caption{Throughput Comparison: P-core vs E-core}
+\label{tab:pe_affinity}
+\begin{tabular}{llrrr}
+\toprule
+\textbf{Class} & \textbf{Method} & \textbf{P-core} & \textbf{E-core} & \textbf{P/E} \\
+\midrule
+cls1 & ackermann  & 3045.50 & 2134.27 & 1.43$\times$ \\
+cls1 & div16      & 2515.01 & 1867.00 & 1.35$\times$ \\
+cls1 & double     & 2486.79 & 1404.70 & 1.77$\times$ \\
+cls1 & matrixprod & 3186.55 & 2851.16 & 1.12$\times$ \\
+\midrule
+cls2 & collatz    & 3560.60 & 1951.42 & 1.82$\times$ \\
+cls2 & fft        & 3876.29 & 1973.20 & 1.96$\times$ \\
+cls2 & int32      & 3862.22 & 2378.60 & 1.62$\times$ \\
+cls2 & rand48     & 2503.29 &  826.71 & 3.03$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The results show a clear distinction between classes. Class~1 workloads exhibit modest speedups on P-cores (1.12$\times$--1.77$\times$), indicating relatively balanced affinity across core types. In contrast, class~2 workloads consistently achieve higher gains (1.62$\times$--3.03$\times$), demonstrating a significantly stronger affinity for P-cores. This confirms that IPCC capture meaningful performance differences that are relevant for scheduling decisions: class-2 tasks have the most to gain from preferential P-core placement, which is precisely the kind of decision ICAS's tiebreaker is meant to inform.
+
+\subsubsection{Hardware-Derived Priority Mapping}
+
+On the evaluated platforms, the HFI assigns a P-core priority score of 59 to hardware class~0 (\texttt{ipcc}~1, non-vectorized code) and 69 to hardware class~1 (\texttt{ipcc}~2, vectorized code). This higher score for class~2 is consistent with the larger P-core speedup measured in Table~\ref{tab:pe_affinity}. On E-cores, both classes map to the same priority, so this scoring only affects placement decisions involving P-cores.
+
+\subsubsection{Classification Under Hyper-Threading}
+
+When both hardware threads of a P-core are simultaneously active, the raw hardware reading no longer separates the two classes: 100\% of samples report \texttt{ipcc}~1, regardless of the workload running on either thread. This was tested with all four combinations of class-1 and class-2 workloads (\texttt{div16}$\times$\texttt{div16}, \texttt{rand48}$\times$\texttt{rand48}, \texttt{div16}$\times$\texttt{rand48}, and the reverse). The ITD maintains counters per physical core, not per hardware thread, which is why the reading cannot be attributed to either sibling.
+
+This observation concerns the raw register, not the class the scheduler ends up using. The accuracy filter and the debounce keep such readings from reaching the stored class, so the scheduler is not misled by them: a busy sibling does not make the classification wrong, it makes it unavailable. What remains is the cost analyzed in Section~\ref{sec:background_ipc}: while the sibling is busy no reading is accepted, so under load the stored class is updated only in the intervals when it is idle, and a task can go unclassified precisely when class-aware placement would be most useful.
+
+% ============================================================================
+\section{IPC Class-Aware Scheduling Experiments}\label{sec:experiments}
+% ============================================================================
+
+Having established in Section~\ref{sec:approach} that the classes do separate P-core affinity (RQ1), this section asks what the scheduler does with them. Phases 1 and 3 address RQ2---whether class information changes where threads run, and whether that shows up as throughput---and Phase 2 addresses RQ3, the cost of reading and filtering the class on every tick.
+
+\subsection{Kernel Configurations}
+
+Two kernel configurations were compared:
+
+\begin{itemize}
+    \item \textbf{\emph{asym\_packing} (baseline):} Linux 7.0-rc1 with ITMT enabled and the HFI-based priority workaround. This configuration activates asymmetric packing in the CFS load balancer, causing idle higher-priority cores to pull runnable tasks from lower-priority runqueues. It does not use IPCC.
+    \item \textbf{\emph{icas}:} Baseline kernel with ICAS enabled on top of ITMT. This adds the MSR reading, accuracy filter, debounce logic, and load-balancer tiebreakers described in Section~\ref{sec:background_ipc}.
+\end{itemize}
+
+The \emph{asym\_packing} configuration is the natural baseline because it represents the current state of the art for hybrid scheduling in mainline Linux with ITMT support. The question this evaluation addresses is whether adding IPCC information on top of ITMT provides measurable benefits.
+
+\subsection{Representative Workloads}
+
+Workloads were empirically mapped to ITD classes via the characterization described in Section~\ref{sec:approach}. The purpose of this step was to select representative workloads for each observed class and then test how the scheduling policy reacts to them.
+
+\begin{itemize}
+    \item \textbf{Core-sensitive workload (class 2):} \texttt{stress-ng --cpu-method rand48} --- a tight-loop PRNG workload with strong affinity for high-performance cores, consistently classified as class~2 (95.5\% of samples).
+
+    \item \textbf{Moderately core-sensitive workload (class 1):} \texttt{stress-ng --cpu-method div16} --- an integer division workload with lower sensitivity to core type, consistently classified as class~1 (100\% of samples).
+
+    \item \textbf{Ephemeral, non-classifiable workload (class 0):} \texttt{schbench -t 4 -m 2 --runtime 15} --- a wakeup-latency benchmark composed of short execution bursts between sleeps, which prevents stable classification and does not exhibit meaningful compute behavior; it is used exclusively to measure scheduler wakeup latency.
+\end{itemize}
+
+If the ITD signal is useful for scheduling, the scheduler should prioritize \texttt{rand48} on P-cores and migrate \texttt{div16} toward E-cores under contention.
+
+\subsection{Benchmark Selection and Scenarios}
+
+Each benchmark was selected to test a specific aspect of the scheduling mechanism. The experimental phases and their rationale are described below.
+
+\subsubsection{Phase 1 --- Placement Correctness (100 runs)}
+
+Placement measures whether the scheduler actually directs tasks to the expected core type based on class. For each run, class-2 and class-1 \texttt{stress-ng} tasks are launched simultaneously, and their CPU residency is polled via \texttt{/proc/PID/stat} over 30 seconds. The metric is the percentage of time that class-2 tasks spend on P-cores (\emph{cls2$\to$P\%}) and class-1 tasks spend on E-cores (\emph{cls1$\to$E\%}). Two scenarios are evaluated:
+
+\begin{itemize}
+    \item \textbf{Relaxed:} $N$ class-2 + $N$ class-1 tasks, where $N$ is the number of physical P-cores (2 tasks on the i5-1334U, 8 on the i9-14900HX). Under low contention, asymmetric packing alone may be sufficient: it pulls tasks blindly toward idle higher-priority cores, and the available P-cores may fully absorb the tasks' demand without needing class-based tiebreaking.
+    \item \textbf{Contention:} $N$ class-2 + $M$ class-1 tasks, where $M$ is the total number of logical CPUs minus $N$, sized to fully load all logical CPUs (12 tasks on the i5-1334U, 32 on the i9-14900HX). Under full contention, all cores are occupied and the scheduler must make more migration decisions. This is where class-aware placement should matter most.
+\end{itemize}
+
+\subsubsection{Phase 2 --- Wakeup Latency (50 runs)}
+
+Wakeup latency, measured with \texttt{schbench}, quantifies the time from a wake signal to the moment the task is actually scheduled. In the ICAS kernel, each scheduler tick reads the hardware class register, evaluates the accuracy filter, and runs the debounce logic, so any overhead in the scheduler critical path manifests here. We report tail latency (p99.9) as the primary metric, since worst-case scheduling delay is precisely where additional scheduler-path overhead becomes most visible.
+
+\subsubsection{Phase 3 --- Throughput (50 runs)}
+
+Throughput measures bogo-ops/s exclusively for class-2 tasks (\texttt{rand48}). This design choice is deliberate: if IPCC distinctions are effective, the scheduler should prioritize class-2 tasks on P-cores, where they achieve up to 3$\times$ higher throughput than on E-cores. A successful class-aware policy would therefore produce higher throughput for class-2 tasks compared to the class-agnostic baseline. Two scenarios are evaluated:
+
+\begin{itemize}
+    \item \textbf{alone:} $N$ class-2 tasks alone, where $N$ is the number of physical P-cores (2 tasks on the i5-1334U, 8 on the i9-14900HX). Establishes baseline throughput without contention.
+    \item \textbf{contention:} $N$ class-2 tasks plus $M$ class-1 background tasks, where $M$ is the total number of logical CPUs minus $N$, sized to saturate the platform (10 background tasks on the i5-1334U, 24 on the i9-14900HX). If class distinctions are effective, the class-2 tasks should be preferentially placed on P-cores even under contention, resulting in higher throughput than the class-agnostic baseline.
+\end{itemize}
+
+\subsection{Results and Discussion}\label{sec:results}
+
+All the results from the scheduling experiments on both platforms are compiled in Table~\ref{tab:system_eval_complete}.
+
+\begin{table*}[t]
+\centering
+\caption{System Performance: Placement, Latency, and Throughput on Both Platforms}
+\label{tab:system_eval_complete}
+\footnotesize
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+& \multicolumn{3}{c}{\textbf{i5-1334U (2P+8E, SMT)}} & \multicolumn{3}{c}{\textbf{i9-14900HX (8P+16E)}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+\textbf{Metric / Scenario} & \textbf{asym\_p} & \textbf{icas} & \textbf{$\Delta\%$} & \textbf{asym\_p} & \textbf{icas} & \textbf{$\Delta\%$} \\
+\midrule
+\multicolumn{7}{@{}l}{\textbf{Placement Residency} (\%, higher is better)} \\
+\emph{Relaxed} \\
+\quad cls2$\to$P mean & $51.8 \pm 19.9$ & $55.3 \pm 23.5$ & $\bm{+6.8}$  & $50.5 \pm 17.3$  & $53.7 \pm 21.2$ & $\bm{+6.3}$ \\
+\quad cls1$\to$E mean & $52.8 \pm 19.9$ & $56.4 \pm 23.4$ & $\bm{+6.8}$  & $53.1 \pm 17.4$  & $54.1 \pm 24.0$ & $\bm{+1.9}$ \\
+\addlinespace
+\emph{Contention} \\
+\quad cls2$\to$P mean & $21.1 \pm 25.5$ & $25.0 \pm 23.6$ & $\bm{+18.5}$ & $37.4 \pm 21.8$ & $40.8 \pm 27.5$ & $\bm{+9.1}$ \\
+\quad cls1$\to$E mean & $64.9 \pm 5.4$  & $65.6 \pm 5.0$  & $\bm{+1.1}$  & $52.70 \pm 18.7$  & $48.8 \pm 24.9$  & $-7.4$  \\
+\midrule
+\multicolumn{7}{@{}l}{\textbf{Wakeup Latency}: schbench ($\mu$s, lower is better)} \\
+\quad baseline p50     & $13949$ & $13963$ & $+0.1$ & --- & --- & --- \\
+\quad baseline p90     & $713$   & $713$   & $0.0$  & --- & --- & --- \\
+\quad baseline p99.9   & $15907$ & $15366$ & $\bm{-3.4}$ & --- & --- & --- \\
+\midrule
+\multicolumn{7}{@{}l}{\textbf{Throughput}: Class-2 Tasks (ops/s, higher is better)} \\
+\quad alone       & $1504$ & $1558$ & $\bm{+3.6}$  & $35239$ & $35471$ & $\bm{+0.7}$ \\
+\quad contention  & $1026$ & $1153$ & $\bm{+12.4}$ & $23859$ & $24259$ & $\bm{+1.7}$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The placement results are central for interpreting whether IPCC actually influenced migration decisions, and Table~\ref{tab:system_eval_complete} shows no meaningful improvement on either platform. In the \emph{relaxed} scenario, asymmetric packing fills P-cores indiscriminately precisely because of the circular dependency described in Section~\ref{sec:background_ipc}: since E-cores never expose ITD classification, every task spawned there carries only the default \texttt{ipcc}~=~1 sentinel regardless of its true class, leaving the initial pulls toward newly-idle P-cores with no IPCC signal to act on. Both cls2$\to$P and cls1$\to$E consequently hover near 50\% on both platforms ($51.8$--$56.4\%$ on the i5-1334U, $50.5$--$54.1\%$ on the i9-14900HX) --- the tiebreaker is not choosing to ignore class, it simply has nothing to distinguish at the moment placement happens.
+
+Under \emph{contention}, residency instead converges toward each platform's core-count ratios rather than any class-based split. On the i5-1334U, cls2$\to$P settles at $21$--$25\%$, far below the SMT-inclusive logical P-thread share ($4/12\approx33.3\%$) and much closer to the physical P-core share ($2/12\approx16.7\%$); this is because the Linux load balancer avoids waking an idle SMT sibling while its pair is busy, resorting to it only as a last option, so under sustained contention each P-core supplies close to one logical unit of capacity rather than two. cls1$\to$E settles at $64.9$--$65.6\%$, matching the E-core share directly ($8/12\approx66.7\%$), as expected since E-cores carry no SMT complication. The same pattern appears on the i9-14900HX: cls1$\to$E matches its E-core share closely ($16/32=50\%$, observed $48.8$--$52.7\%$), and cls2$\to$P ($37$--$41\%$) again falls well short of the logical P-thread share ($16/32=50\%$), consistent with the same SMT-avoidance dynamic. The i9's higher absolute residency values are not evidence that IPCC works better there: they follow directly from its more favorable physical P:E ratio ($8{:}16=0.5$ versus $2{:}8=0.25$ on the i5), which biases placement identically under a fully class-agnostic policy.
+
+Crucially, this absence of a class-based split is not merely a symptom of the accuracy filter and debounce requirement delaying classification under SMT contention, as described in Section~\ref{sec:background_ipc} for tasks already resident on a P-core. The E-core blind spot changes the problem more fundamentally: since only P-core-resident tasks can ever be classified, a task waiting on an E-core---exactly the candidate the tiebreaker must evaluate before pulling---is indistinguishable from any other unclassified task until after it has already been placed. This alone is sufficient to explain why the tiebreaker rarely has usable information at decision time; the debounce/accuracy-filter interaction under SMT contention only compounds the problem once a task does reach a P-core.
+
+The large standard deviations and the presence of extreme cases (best runs near 100\%, worst near 0\%) indicate that both configurations are strongly influenced by the initial placement lottery: neither ITMT alone nor ITMT+IPCC steer tasks consistently toward their preferred core types within the duration of the experiments.
+
+The wakeup latency results were measured with \texttt{schbench} on the i5-1334U and show no observable impact from the periodic reading of the ITD hardware signal. Table~\ref{tab:system_eval_complete} also reports throughput for class-2 tasks (\texttt{rand48}): despite up to 3$\times$ higher throughput potential on P-cores, throughput remains stable and within error of the baseline in both scenarios on both platforms, consistent with IPCC rarely reaching a confirmed classification under sustained load.
+
+\section{Conclusion}\label{sec:conclusion}
+
+This work evaluated an IPC Class-Aware Scheduling (ICAS) approach for Intel hybrid processors by implementing it in Linux 7.0-rc1 and testing it on two Raptor Lake platforms with contrasting topologies (i5-1334U with 2P+8E and i9-14900HX with 8P+16E). The empirical characterization of the two general-purpose IPC classes shows that classes~1 and~2 are stable and distinguishable on isolated P-cores, with class-2 workloads achieving up to 3$\times$ higher throughput on P-cores than on E-cores versus a more modest 1.12--1.77$\times$ for class-1 workloads, confirming that the classes capture a performance-relevant distinction. That distinction is only observable in SMT-idle windows, and the kernel accordingly stores no class outside them.
+
+The scheduling evaluation shows that reading the hardware class on every tick does not introduce any measurable increase in wakeup latency, but that the IPCC signal is largely inaccessible under load: the accuracy filter rejects classifications precisely when the system is contended, the debounce filter struggles to accumulate four consecutive readings, and the pull-based design creates a circular dependency with E-core classification that persists on the 8P+16E i9 despite its larger P-core count. As a consequence, throughput and placement residency remain within run-to-run variability between \emph{asym\_packing} and \emph{icas} on both platforms. Future work includes re-evaluating ICAS with Hyper-Threading disabled (which should eliminate the accuracy-filter bottleneck) and replacing the pull-based tiebreaker with a \emph{push-based} policy: when a P-core is overloaded, it would preferentially eject lower-priority class~1 tasks toward E-cores. Because classification would already have occurred on the P-core before the push, this approach would not depend on E-core tasks being pre-classified and would break the circular dependency identified above.
+
+% \section*{Acknowledgment}
+
+% This work has been supported by the National Council for Scientific and Technological Development -- CNPq and by Petrobras under the cooperation agreement project No. 0050.0132311.25.9.
+
+% ============================================================================
+% REFERENCES
+% ============================================================================
+
+\bibliographystyle{unsrt}
+\bibliography{references}
+
+% \balance
+\end{document}
