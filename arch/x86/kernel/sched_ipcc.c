@@ -25,6 +25,15 @@
 
 #define CLASS_DEBOUNCER_SKIPS 4
 
+/*
+ * TEMPORARY ablation switches (paper experiments). Comment out to restore the
+ * original behavior.
+ *  - NO_DEBOUNCE:      store the class from the first reading, no 4-tick wait.
+ *  - NO_SMT_FILTER:    accept readings even when the SMT sibling is busy.
+ */
+#define IPCC_ABLATION_NO_DEBOUNCE
+#define IPCC_ABLATION_NO_SMT_FILTER
+
 /**
  * debounce_and_update_class() - Process and update a task's classification
  *
@@ -94,7 +103,17 @@ void intel_update_ipcc(struct task_struct *curr)
 	 * 0 is a valid classification for Intel Thread Director. A scheduler
 	 * IPCC class of 0 means that the task is unclassified. Adjust.
 	 */
+#ifndef IPCC_ABLATION_NO_SMT_FILTER
 	idle = sched_smt_siblings_idle(task_cpu(curr));
-	if (classification_is_accurate(hfi_class, idle))
-		debounce_and_update_class(curr, hfi_class + 1);
+	if (!classification_is_accurate(hfi_class, idle))
+		return;
+#else
+	(void)idle;
+#endif
+
+#ifdef IPCC_ABLATION_NO_DEBOUNCE
+	curr->ipcc = hfi_class + 1;
+#else
+	debounce_and_update_class(curr, hfi_class + 1);
+#endif
 }
