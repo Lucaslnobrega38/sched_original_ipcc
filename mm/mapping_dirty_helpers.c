@@ -275,35 +275,6 @@ unsigned long wp_shared_mapping_range(struct address_space *mapping,
 EXPORT_SYMBOL_GPL(wp_shared_mapping_range);
 
 /**
- * wp_shared_mapping_vma - Write-protect all ptes of a single VMA backed by a
- *			   shared mapping
- * @vma: The VMA to write-protect
- * @start: Start of the range within @vma
- * @end: End of the range within @vma
- *
- * Same walk as wp_shared_mapping_range(), scoped to one known VMA instead of
- * every mapper of the address_space (which walks the i_mmap reverse-mapping
- * tree). For callers that need to defang exactly one process's view of a
- * shared mapping.
- *
- * Caller must hold vma->vm_mm's mmap_lock for at least read, and must clear
- * VM_SHARED only *after* this returns (wp_clean_test_walk() requires it set
- * to walk the VMA at all).
- *
- * Return: The number of ptes actually write-protected.
- */
-unsigned long wp_shared_mapping_vma(struct vm_area_struct *vma,
-				    unsigned long start, unsigned long end)
-{
-	struct wp_walk wpwalk = { .total = 0 };
-
-	WARN_ON(walk_page_vma(vma, &wp_walk_ops, &wpwalk));
-
-	return wpwalk.total;
-}
-EXPORT_SYMBOL_GPL(wp_shared_mapping_vma);
-
-/**
  * clean_record_shared_mapping_range - Clean and record all ptes in an
  * address space range
  * @mapping: The address_space we want to clean

@@ -49,8 +49,8 @@ static void update_ipcc_class_weights(struct task_struct *p, u8 class_idx)
 	}
 }
 
-/* Consecutive matching ticks before a class commits. Global, not shadow-only. */
-#define CLASS_DEBOUNCER_SKIPS 2
+/* Consecutive matching ticks before a class commits. */
+#define CLASS_DEBOUNCER_SKIPS 4
 
 static void debounce_and_update_class(struct task_struct *p, u8 new_ipcc)
 {
@@ -59,7 +59,6 @@ static void debounce_and_update_class(struct task_struct *p, u8 new_ipcc)
 	/* The class of @p changed. Only restart the debounce counter. */
 	if (p->ipcc_prev != new_ipcc) {
 		p->ipcc_stable_count = 1;
-		p->ipcc_confirm_count = 0;
 		goto out;
 	}
 
@@ -67,12 +66,8 @@ static void debounce_and_update_class(struct task_struct *p, u8 new_ipcc)
 	if (debounce_skip < CLASS_DEBOUNCER_SKIPS) {
 		p->ipcc_stable_count++;
 	} else {
-		//trace_printk("ipcc-real: pid=%d class=%d cpu=%d\n",
-		//	     p->pid, new_ipcc, smp_processor_id());
 		p->ipcc = new_ipcc;
 		update_ipcc_class_weights(p, new_ipcc);
-		if (p->ipcc_confirm_count < U8_MAX)
-			p->ipcc_confirm_count++;
 	}
 
 out:
@@ -131,22 +126,8 @@ void intel_update_ipcc(struct task_struct *curr)
 	int cpu = task_cpu(curr);
 
 	/* E-cores don't report HFI classes. cpu_type's core bits are 31:24. */
-	if (ipcc_cpu_is_ecore(cpu)) {
-#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
-		ipcc_classify_tick(curr, cpu);
-#endif
+	if (ipcc_cpu_is_ecore(cpu))
 		return;
-	}
-
-#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
-	/* A shadow's tick bypasses the debouncer: one unfiltered reading. */
-	if (test_task_syscall_work(curr, IPCC_SHADOW)) {
-		intel_classify_ipcc_final(curr);
-		if (curr->ipcc)
-			ipcc_shadow_confirmed(curr);
-		return;
-	}
-#endif
 
 	if (intel_hfi_read_classid(&hfi_class))
 		return;
@@ -156,33 +137,3 @@ void intel_update_ipcc(struct task_struct *curr)
 	if (classification_is_accurate(hfi_class, idle))
 		debounce_and_update_class(curr, hfi_class + 1);
 }
-
-#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
-/*
- * Take a shadow's one and only classification reading, right before it dies.
- * Called from ipcc_shadow_syscall_denied(). See context.md.
- */
-void intel_classify_ipcc_final(struct task_struct *p)
-{
-	u8 hfi_class, new_ipcc;
-	bool idle;
-	int cpu = task_cpu(p);
-
-	if (intel_hfi_read_classid(&hfi_class))
-		return;
-
-	idle = sched_smt_siblings_idle(cpu);
-	if (!classification_is_accurate(hfi_class, idle))
-		return;
-
-	new_ipcc = hfi_class + 1;
-
-	if (p->ipcc != new_ipcc)
-		p->ipcc_confirm_count = 0;
-
-	p->ipcc = new_ipcc;
-	update_ipcc_class_weights(p, new_ipcc);
-	if (p->ipcc_confirm_count < U8_MAX)
-		p->ipcc_confirm_count++;
-}
-#endif

@@ -1371,22 +1371,6 @@ struct mm_struct {
 #ifdef CONFIG_MM_ID
 		mm_id_t mm_id;
 #endif /* CONFIG_MM_ID */
-#ifdef CONFIG_IPC_CLASSES_SHADOW_ODF
-		/* Linkage between a shadow clone's mm and its target's - see
-		 * context.md. A given mm only ever populates one direction:
-		 * ipcc_shadows(+lock) on a target's mm, ipcc_shadow_of(+node)
-		 * on a shadow's (a shadow can never itself gain shadows).
-		 */
-		struct list_head ipcc_shadows;
-		spinlock_t ipcc_shadows_lock;
-		struct list_head ipcc_shadow_node;
-		struct mm_struct *ipcc_shadow_of;
-		/* Undo log on a shadow's mm: page index -> fork-time folio,
-		 * one reference held. Written by the target from its own COW
-		 * fault, drained by the shadow's fault or at teardown.
-		 */
-		struct xarray ipcc_odf;
-#endif /* CONFIG_IPC_CLASSES_SHADOW_ODF */
 	} __randomize_layout;
 
 	/*

@@ -5143,7 +5143,7 @@ static inline unsigned long apply_ipcc_weight(struct task_struct *p,int cpu,unsi
 static int ipcc_best_pcore_cpu __read_mostly = -1;
 
 /* [min,max] cpu id bounds of the P-core/E-core sets, gap-free by
- * construction - see context.md and ipcc_pick_classifier_cpu().
+ * construction - see context.md.
  */
 static int ipcc_pcore_min __read_mostly = -1, ipcc_pcore_max __read_mostly = -1;
 static int ipcc_ecore_min __read_mostly = -1, ipcc_ecore_max __read_mostly = -1;

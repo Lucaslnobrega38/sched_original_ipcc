@@ -4395,15 +4395,7 @@ static void __sched_fork(u64 clone_flags, struct task_struct *p)
 	p->ipcc = 0;
 	p->ipcc_prev = 0;
 	p->ipcc_stable_count = 0;
-	p->ipcc_confirm_count = 0;
 	memset(p->ipcc_class_weight, 0, sizeof(p->ipcc_class_weight));
-	/* ipcc_shadow_last_turn NOT stamped here - see sched_fork(); ktime_get()
-	 * isn't safe yet when sched_init() calls this for the idle task.
-	 */
-#endif
-#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
-	/* dup_task_struct() copied current byte-for-byte; reset, don't inherit. */
-	p->ipcc_shadow_status = IPCC_SHADOW_NONE;
 #endif
 
 	p->on_rq			= 0;
@@ -4644,13 +4636,6 @@ late_initcall(sched_core_sysctl_init);
 int sched_fork(u64 clone_flags, struct task_struct *p)
 {
 	__sched_fork(clone_flags, p);
-
-#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
-	/* Safe here (unlike __sched_fork()): always well after timekeeping_init().
-	 * Resets lag to 0 instead of inheriting the parent's via dup_task_struct().
-	 */
-	p->ipcc_shadow_last_turn = ktime_get();
-#endif
 	/*
 	 * We mark the process as NEW here. This guarantees that
 	 * nobody will actually run it, and a signal or other external

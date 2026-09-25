@@ -52,7 +52,6 @@
 #include <linux/pagemap.h>
 #include <linux/memremap.h>
 #include <linux/kmsan.h>
-#include <linux/ipcc_odf.h>
 #include <linux/ksm.h>
 #include <linux/rmap.h>
 #include <linux/export.h>
@@ -4211,14 +4210,6 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 	}
 
 	/*
-	 * A live shadow still owes this page's fork-time contents. Taking a
-	 * reference here is what denies the reuse test just below, so the
-	 * copy really happens and the old folio stays intact for the shadow.
-	 */
-	if (folio && folio_test_anon(folio) && ipcc_odf_wants_log(vma->vm_mm))
-		ipcc_odf_log(vma->vm_mm, vmf->address & PAGE_MASK, folio);
-
-	/*
 	 * Private mapping: create an exclusive anonymous page copy if reuse
 	 * is impossible. We might miss VM_WRITE for FOLL_FORCE handling.
 	 *
@@ -4239,7 +4230,6 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 	/*
 	 * Ok, we need to copy. Oh, well..
 	 */
-
 	if (folio)
 		folio_get(folio);
 
@@ -4481,13 +4471,6 @@ static vm_fault_t pte_marker_clear(struct vm_fault *vmf)
 
 static vm_fault_t do_pte_missing(struct vm_fault *vmf)
 {
-	if (ipcc_odf_wants_populate(vmf->vma)) {
-		vm_fault_t ret;
-
-		if (ipcc_odf_populate(vmf, &ret))
-			return ret;
-	}
-
 	if (vma_is_anonymous(vmf->vma))
 		return do_anonymous_page(vmf);
 	else

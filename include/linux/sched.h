@@ -827,16 +827,6 @@ struct kmap_ctrl {
 #define IPCC_WEIGHT_SHIFT	4
 #endif
 
-#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
-/* Persistent per-target shadow state - see context.md. */
-enum ipcc_shadow_status {
-	IPCC_SHADOW_NONE = 0,	/* no live/pending shadow for this target */
-	IPCC_SHADOW_SCHEDULED,	/* task_work submitted, shadow_kernel_clone() not yet run */
-	IPCC_SHADOW_DELIVERED,	/* fork succeeded; shadow alive, awaiting/undergoing dwell */
-	IPCC_SHADOW_EVICTED,	/* previous attempt superseded; torn down (or being torn down) */
-};
-#endif
-
 struct task_struct {
 
 #ifdef CONFIG_THREAD_INFO_IN_TASK
@@ -861,17 +851,7 @@ struct task_struct {
 	unsigned short		ipcc;		/* confirmed class (0 = unclassified) */
 	unsigned short		ipcc_prev;	/* previous candidate from MSR */
 	unsigned char		ipcc_stable_count; /* consecutive identical readings */
-	unsigned char		ipcc_confirm_count; /* ticks since debounce last committed - see context.md */
 	unsigned short		ipcc_class_weight[NR_IPC_CLASSES]; /* EWMA of runtime per class, see context.md */
-#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
-	ktime_t			ipcc_shadow_died_at;		/* set by ipcc_shadow_syscall_denied() */
-	ktime_t			ipcc_shadow_confirmed_at;	/* set by ipcc_shadow_confirmed() */
-	ktime_t			ipcc_shadow_last_turn;		/* lag anchor, see context.md */
-	enum ipcc_shadow_status	ipcc_shadow_status;
-#endif
-#ifdef CONFIG_IPC_CLASSES_SHADOW_ODF
-	unsigned int		ipcc_odf_fork;	/* dup_mmap() must skip page tables */
-#endif
 #endif
 
 	void				*stack;
@@ -2368,14 +2348,6 @@ static inline int sched_core_idle_cpu(int cpu) { return idle_cpu(cpu); }
 #endif
 
 extern void sched_set_stop_task(int cpu, struct task_struct *stop);
-
-#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
-/* See arch/x86/kernel/sched_ipcc_classifier.c and context.md. */
-void __noreturn ipcc_shadow_syscall_denied(void);
-void ipcc_classify_tick(struct task_struct *curr, int cpu);
-int ipcc_get_classifier_cpu(void);
-void ipcc_shadow_confirmed(struct task_struct *p);
-#endif
 
 #ifdef CONFIG_MEM_ALLOC_PROFILING
 static __always_inline struct alloc_tag *alloc_tag_save(struct alloc_tag *tag)

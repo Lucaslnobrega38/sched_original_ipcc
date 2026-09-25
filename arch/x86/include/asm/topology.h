@@ -351,8 +351,4 @@ void intel_update_ipcc(struct task_struct *curr);
 #define arch_get_ipcc_baseline intel_hfi_get_ipcc_baseline
 #endif
 
-#ifdef CONFIG_IPC_CLASSES_ACTIVE_CLASSIFIER
-void intel_classify_ipcc_final(struct task_struct *p);
-#endif
-
 #endif /* _ASM_X86_TOPOLOGY_H */
